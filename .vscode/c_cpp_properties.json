@@ -1,0 +1,38 @@
+{
+  "configurations": [
+    {
+      "name": "PYNQ Project - Windows IntelliSense",
+      "includePath": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/chassis/drive",
+        "${workspaceFolder}/chassis/nav",
+        "${workspaceFolder}/chassis/odom",
+        "${workspaceFolder}/comms",
+        "${workspaceFolder}/constants",
+        "${workspaceFolder}/sensors",
+        "${workspaceFolder}/sensors/color",
+        "${workspaceFolder}/sensors/distance",
+        "${workspaceFolder}/sensors/temperature"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}",
+          "${workspaceFolder}/chassis/drive",
+          "${workspaceFolder}/chassis/nav",
+          "${workspaceFolder}/chassis/odom",
+          "${workspaceFolder}/comms",
+          "${workspaceFolder}/constants",
+          "${workspaceFolder}/sensors",
+          "${workspaceFolder}/sensors/color",
+          "${workspaceFolder}/sensors/distance",
+          "${workspaceFolder}/sensors/temperature"
+        ]
+      },
+      "defines": [],
+      "compilerPath": "C:/msys64/ucrt64/bin/gcc.exe",
+      "cStandard": "gnu11",
+      "intelliSenseMode": "windows-gcc-x64"
+    }
+  ],
+  "version": 4
+}
