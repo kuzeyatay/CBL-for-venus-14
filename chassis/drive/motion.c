@@ -7,86 +7,34 @@
 #include "odometry.h"
 #include "motion.h"
 
-int speedFromCmPerSec(float cm_per_sec) {
+int speedFromCmPerSec(float cm_per_sec)
+{
     int speed_value = round(
-        1.0 / (cm_per_sec * STEPS_PER_CM * SECONDS_PER_SPEED_UNIT)
-    );
+        1.0 / (cm_per_sec * STEPS_PER_CM * SECONDS_PER_SPEED_UNIT));
 
-    if (speed_value < STEPPER_SPEED_MIN_VALUE) {
+    if (speed_value < STEPPER_SPEED_MIN_VALUE)
+    {
         speed_value = STEPPER_SPEED_MIN_VALUE;
     }
 
-    if (speed_value > STEPPER_SPEED_MAX_VALUE) {
+    if (speed_value > STEPPER_SPEED_MAX_VALUE)
+    {
         speed_value = STEPPER_SPEED_MAX_VALUE;
     }
 
     return speed_value;
 }
 
-void moveWithRamp(float distance_cm, float speed_cm_s) {
-    int total_steps = round(fabs(distance_cm) * STEPS_PER_CM);
-
-    if (total_steps <= 0) {
-        return;
-    }
-
-    int direction = (distance_cm >= 0) ? 1 : -1;
-
-    int startspeed = STEPPER_SPEED_MAX_VALUE;
-    int targetspeed = speedFromCmPerSec(speed_cm_s);
-
-    if (targetspeed < STEPPER_SPEED_MIN_VALUE) {
-        targetspeed = STEPPER_SPEED_MIN_VALUE;
-    }
-
-    if (targetspeed > STEPPER_SPEED_MAX_VALUE) {
-        targetspeed = STEPPER_SPEED_MAX_VALUE;
-    }
-
-    int rampsteps = 0.2 * total_steps;
-
-    if (rampsteps > 400) {
-        rampsteps = 400;
-    }
-
-    int chunk = 5;
-
-    for (int i = 0; i < total_steps; i += chunk) {
-        int remaining = total_steps - i;
-        int this_chunk = remaining < chunk ? remaining : chunk;
-
-        int stepperspeed;
-
-        if (rampsteps > 0 && i < rampsteps) {
-            float progress = (float)i / rampsteps;
-            stepperspeed = startspeed - progress * (startspeed - targetspeed);
-        } else if (rampsteps > 0 && i >= total_steps - rampsteps) {
-            float progress = (float)(total_steps - i) / rampsteps;
-            stepperspeed = startspeed - progress * (startspeed - targetspeed);
-        } else {
-            stepperspeed = targetspeed;
-        }
-
-        stepper_set_speed(stepperspeed, stepperspeed);
-        stepper_steps(direction * this_chunk, direction * this_chunk);
-
-        while (!stepper_steps_done()) {
-            // wait until this chunk is completed
-        }
-    }
-
-    sleep_msec(500);
-    updatePoseAfterMove(distance_cm);
-}
-
-void move(float distance_cm, float speed_cm_s) {
+void moveWithRamp(float distance_cm, float speed_cm_s)
+{
     int steps = round(distance_cm * STEPS_PER_CM);
 
     int stepper_speed = speedFromCmPerSec(speed_cm_s);
     stepper_set_speed(stepper_speed, stepper_speed);
     stepper_steps(steps, steps);
 
-    while (!stepper_steps_done()) {
+    while (!stepper_steps_done())
+    {
         // wait
     }
 
@@ -94,10 +42,29 @@ void move(float distance_cm, float speed_cm_s) {
     updatePoseAfterMove(distance_cm);
 }
 
-void turn(float angle_deg, float speed_cm_s) {
+void move(float distance_cm, float speed_cm_s)
+{
+    int steps = round(distance_cm * STEPS_PER_CM);
+
+    int stepper_speed = speedFromCmPerSec(speed_cm_s);
+    stepper_set_speed(stepper_speed, stepper_speed);
+    stepper_steps(steps, steps);
+
+    while (!stepper_steps_done())
+    {
+        // wait
+    }
+
+    sleep_msec(500);
+    updatePoseAfterMove(distance_cm);
+}
+
+void turn(float angle_deg, float speed_cm_s)
+{
     angle_deg = fmodf(angle_deg, 360);
 
-    if (angle_deg > 180) {
+    if (angle_deg > 180)
+    {
         angle_deg -= 360;
     }
 
@@ -110,7 +77,8 @@ void turn(float angle_deg, float speed_cm_s) {
 
     stepper_steps(-steps, steps);
 
-    while (!stepper_steps_done()) {
+    while (!stepper_steps_done())
+    {
         // wait
     }
 
@@ -118,7 +86,8 @@ void turn(float angle_deg, float speed_cm_s) {
     updatePoseAfterTurn(angle_deg);
 }
 
-void moveTo(float target_x_cm, float target_y_cm, float speed_cm_s) {
+void moveTo(float target_x_cm, float target_y_cm, float speed_cm_s)
+{
     pose_t pose = getPose();
 
     float delta_x = target_x_cm - pose.x;
@@ -136,13 +105,16 @@ void moveTo(float target_x_cm, float target_y_cm, float speed_cm_s) {
     moveWithRamp(distance_to_target, speed_cm_s);
 }
 
-void setSpeed(float speed_cm_s) {
+void setSpeed(float speed_cm_s)
+{
     int stepper_speed = speedFromCmPerSec(speed_cm_s);
     stepper_set_speed(stepper_speed, stepper_speed);
 }
 
-void dance(void) {
-    for (int i = 0; i < 5; i++) {
+void dance(void)
+{
+    for (int i = 0; i < 5; i++)
+    {
         turn(60, 25);
         turn(-60, 25);
     }
