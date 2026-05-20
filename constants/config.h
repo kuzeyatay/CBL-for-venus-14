@@ -40,7 +40,7 @@
 #define FORWARD_INCREMENT_CM 10.0      // Distance the robot moves forward in one navigation step.
                                        // Short increments make obstacle and tape detection safer.
 
-#define REVERSE_DISTANCE_CM 8.0        // Distance the robot reverses after detecting a hazard or sample.
+#define REVERSE_DISTANCE_CM 0.0        // Distance the robot reverses after detecting a hazard or sample.
                                        // Creates space before turning away.
 
 #define AVOID_TURN_DEG 90.0            // Default turn angle after detecting a cliff, boundary, hill, or obstacle.
