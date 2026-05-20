@@ -21,6 +21,7 @@
  * - calibrated color classification
  * - black-tape detection
  * - loading calibration profiles from the base station
+ * - manually loading calibration values
  * - sending raw calibration readings
  *
  * Wiring:
@@ -39,16 +40,6 @@
  * - OE/EN must be connected to GND.
  */
 
-
-/*
- * The TCS3200 lets the software choose which group of photodiodes is active.
- *
- * The selected filter determines what kind of light is measured:
- * - red-filtered photodiodes
- * - green-filtered photodiodes
- * - blue-filtered photodiodes
- * - clear/no-filter photodiodes
- */
 typedef enum {
     FILTER_RED,
     FILTER_GREEN,
@@ -56,29 +47,15 @@ typedef enum {
     FILTER_CLEAR
 } tcs_filter_t;
 
-
-/*
- * Internal TCS3200 color labels.
- *
- * These are separate from sample_color_t because sample_color_t belongs to the
- * higher-level robot/navigation system.
- */
 typedef enum {
-    TCS_COLOR_NONE  = 0,
-    TCS_COLOR_WHITE = 1,
-    TCS_COLOR_BLACK = 2,
-    TCS_COLOR_RED   = 3,
-    TCS_COLOR_GREEN = 4,
-    TCS_COLOR_BLUE  = 5,
-    TCS_COLOR_COUNT = 6
+    TCS_COLOR_WHITE = 0,
+    TCS_COLOR_BLACK = 1,
+    TCS_COLOR_RED   = 2,
+    TCS_COLOR_GREEN = 3,
+    TCS_COLOR_BLUE  = 4,
+    TCS_COLOR_COUNT = 5
 } tcs_color_t;
 
-
-/*
- * Raw frequency reading from the TCS3200.
- *
- * Each field is a measured frequency in Hz.
- */
 typedef struct {
     double red;
     double green;
@@ -86,16 +63,6 @@ typedef struct {
     double clear;
 } color_reading_t;
 
-
-/*
- * Normalized color features used for classification.
- *
- * red_ratio, green_ratio, blue_ratio:
- *     Describe the relative color composition.
- *
- * brightness:
- *     Clear-channel brightness relative to calibrated white.
- */
 typedef struct {
     double red_ratio;
     double green_ratio;
@@ -103,30 +70,13 @@ typedef struct {
     double brightness;
 } color_feature_t;
 
-
-/*
- * A calibrated color profile.
- *
- * raw:
- *     The original measured R/G/B/C frequencies for that known color.
- *
- * feature:
- *     The normalized version used for comparison during live classification.
- */
 typedef struct {
     const char *name;
     color_reading_t raw;
     color_feature_t feature;
 } color_profile_t;
 
-
-/*
- * Calibration profiles.
- *
- * These are filled when the base station sends a TCSCAL message.
- */
 static color_profile_t profiles[TCS_COLOR_COUNT] = {
-    {"none",  {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}},
     {"white", {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}},
     {"black", {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}},
     {"red",   {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}},
@@ -134,34 +84,11 @@ static color_profile_t profiles[TCS_COLOR_COUNT] = {
     {"blue",  {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}}
 };
 
-
-/*
- * True after valid calibration data has been loaded.
- */
 static bool calibrated = false;
 
-
-/*
- * Clear-channel value of the calibrated white sample.
- *
- * Used as brightness reference.
- */
 static double white_clear_reference = 1.0;
+static double black_clear_threshold = 0.0;
 
-
-/*
- * Maximum feature-distance from the calibrated "none/background" profile
- * before a live reading is considered a real object color.
- */
-static double none_radius = 0.05;
-
-
-/*
- * Returns monotonic time in milliseconds.
- *
- * Monotonic time is used because it only moves forward and is therefore better
- * for elapsed-time measurements than wall-clock time.
- */
 static double now_msec(void)
 {
     struct timespec ts;
@@ -170,26 +97,11 @@ static double now_msec(void)
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
 
-
-/*
- * Writes HIGH or LOW to one TCS3200 control pin.
- */
 static void write_pin(io_t pin, bool high)
 {
     gpio_set_level(pin, high ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
 }
 
-
-/*
- * Selects which photodiode filter the TCS3200 uses.
- *
- * Filter selection table:
- *
- * S2 = LOW,  S3 = LOW  -> red
- * S2 = LOW,  S3 = HIGH -> blue
- * S2 = HIGH, S3 = LOW  -> clear
- * S2 = HIGH, S3 = HIGH -> green
- */
 static void tcs_select_filter(tcs_filter_t filter)
 {
     switch (filter) {
@@ -214,19 +126,9 @@ static void tcs_select_filter(tcs_filter_t filter)
             break;
     }
 
-    /*
-     * Give the sensor output time to settle after switching filters.
-     */
     sleep_msec(SETTLE_TIME_MS);
 }
 
-
-/*
- * Measures the frequency on the TCS3200 OUT pin.
- *
- * The TCS3200 outputs a square wave.
- * Higher frequency means more reflected light for the selected filter.
- */
 static double measure_frequency_hz(int sample_time_ms)
 {
     double start = now_msec();
@@ -244,25 +146,9 @@ static double measure_frequency_hz(int sample_time_ms)
         previous = current;
     }
 
-    /*
-     * Frequency = cycles / seconds.
-     *
-     * Since sample_time_ms is in milliseconds:
-     *
-     * frequency_hz = rising_edges * 1000 / sample_time_ms
-     */
     return (double)rising_edges * 1000.0 / (double)sample_time_ms;
 }
 
-
-/*
- * Initializes the TCS3200 GPIO pins.
- *
- * Call once after:
- *
- *     pynq_init();
- *     gpio_init();
- */
 void tcs3200Init(void)
 {
     switchbox_set_pin(PIN_S0,  SWB_GPIO);
@@ -278,25 +164,13 @@ void tcs3200Init(void)
     gpio_set_direction(PIN_OUT, GPIO_DIR_INPUT);
 
     /*
-     * Frequency scaling.
-     *
+     * Frequency scaling:
      * S0 = HIGH, S1 = LOW gives 20% scaling.
-     * This usually works better than 2% for software frequency counting.
      */
     write_pin(PIN_S0, true);
     write_pin(PIN_S1, false);
 }
 
-
-/*
- * Reads one complete raw color measurement.
- *
- * The function measures:
- * - red-filter response
- * - green-filter response
- * - blue-filter response
- * - clear/no-filter response
- */
 static color_reading_t tcs_read_color_once(void)
 {
     color_reading_t reading;
@@ -316,12 +190,6 @@ static color_reading_t tcs_read_color_once(void)
     return reading;
 }
 
-
-/*
- * Reads the color sensor multiple times and returns the average.
- *
- * Averaging reduces noise from small lighting changes and timing variation.
- */
 static color_reading_t tcs_read_color_average(int samples)
 {
     color_reading_t sum = {0.0, 0.0, 0.0, 0.0};
@@ -349,10 +217,6 @@ static color_reading_t tcs_read_color_average(int samples)
     return sum;
 }
 
-
-/*
- * Converts raw R/G/B/C frequency values into normalized features.
- */
 static color_feature_t extract_feature(color_reading_t reading)
 {
     color_feature_t f;
@@ -378,24 +242,6 @@ static color_feature_t extract_feature(color_reading_t reading)
     return f;
 }
 
-
-/*
- * Prints only the raw TCS3200 reading.
- */
-static void print_raw_reading(const char *prefix, color_reading_t r)
-{
-    printf("%s RAW: R=%7.1f  G=%7.1f  B=%7.1f  C=%7.1f\n",
-           prefix,
-           r.red,
-           r.green,
-           r.blue,
-           r.clear);
-}
-
-
-/*
- * Prints raw values and normalized features.
- */
 static void print_full_reading(const char *prefix, color_reading_t r)
 {
     color_feature_t f = extract_feature(r);
@@ -414,13 +260,6 @@ static void print_full_reading(const char *prefix, color_reading_t r)
            f.brightness);
 }
 
-
-/*
- * Computes weighted squared distance between two normalized color features.
- *
- * RGB ratios mainly describe color/hue.
- * Brightness helps distinguish black, white, and background.
- */
 static double feature_distance(color_feature_t a, color_feature_t b)
 {
     double dr = a.red_ratio   - b.red_ratio;
@@ -435,78 +274,130 @@ static double feature_distance(color_feature_t a, color_feature_t b)
         2.0 * dv * dv;
 }
 
-
-/*
- * Computes the "none/background" radius.
- *
- * If a live reading is very close to the calibrated background reading, it is
- * classified as TCS_COLOR_NONE instead of being forced into a real color.
- */
-static void compute_none_radius(void)
+static void compute_black_threshold(void)
 {
-    color_feature_t none_feature = profiles[TCS_COLOR_NONE].feature;
+    double black_clear = profiles[TCS_COLOR_BLACK].raw.clear;
+    double min_nonblack_clear = profiles[TCS_COLOR_WHITE].raw.clear;
 
-    double min_distance =
-        feature_distance(none_feature, profiles[TCS_COLOR_WHITE].feature);
+    for (int i = 0; i < TCS_COLOR_COUNT; i++) {
+        if (i == TCS_COLOR_BLACK) {
+            continue;
+        }
 
-    for (int i = TCS_COLOR_BLACK; i < TCS_COLOR_COUNT; i++) {
-        double d = feature_distance(none_feature, profiles[i].feature);
-
-        if (d < min_distance) {
-            min_distance = d;
+        if (profiles[i].raw.clear < min_nonblack_clear) {
+            min_nonblack_clear = profiles[i].raw.clear;
         }
     }
 
     /*
-     * Bigger multiplier:
-     *     More likely to classify live readings as "none".
-     *
-     * Smaller multiplier:
-     *     More likely to classify live readings as a real color.
+     * Anything darker than halfway between calibrated black and the darkest
+     * non-black sample is classified as black.
      */
-    none_radius = min_distance * 0.45;
-
-    if (none_radius < 0.02) {
-        none_radius = 0.02;
-    }
+    black_clear_threshold = (black_clear + min_nonblack_clear) / 2.0;
 }
 
-
-/*
- * Classifies a raw reading using the loaded calibration profiles.
- */
-static tcs_color_t classify_color_enum(color_reading_t reading)
+static bool calibration_has_signal(void)
 {
-    if (!calibrated) {
-        return TCS_COLOR_NONE;
+    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
+        if (profiles[color].raw.red <= 0.0 &&
+            profiles[color].raw.green <= 0.0 &&
+            profiles[color].raw.blue <= 0.0 &&
+            profiles[color].raw.clear <= 0.0) {
+
+            printf("TCS calibration error: %s profile has no signal.\n",
+                   profiles[color].name);
+
+            return false;
+        }
     }
 
-    if (reading.red <= 0.0 &&
-        reading.green <= 0.0 &&
-        reading.blue <= 0.0 &&
-        reading.clear <= 0.0) {
-        return TCS_COLOR_NONE;
+    return true;
+}
+
+static bool tcs3200ApplyCalibrationValues(const double values[20],
+                                          const char *source_name)
+{
+    if (values == NULL) {
+        calibrated = false;
+        return false;
+    }
+
+    /*
+     * Order:
+     * white, black, red, green, blue
+     *
+     * Channels per color:
+     * R, G, B, C
+     */
+    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
+        int base = color * 4;
+
+        profiles[color].raw.red   = values[base + 0];
+        profiles[color].raw.green = values[base + 1];
+        profiles[color].raw.blue  = values[base + 2];
+        profiles[color].raw.clear = values[base + 3];
+    }
+
+    if (!calibration_has_signal()) {
+        calibrated = false;
+        return false;
+    }
+
+    white_clear_reference = profiles[TCS_COLOR_WHITE].raw.clear;
+
+    if (white_clear_reference <= 0.0) {
+        white_clear_reference = 1.0;
+    }
+
+    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
+        profiles[color].feature = extract_feature(profiles[color].raw);
+    }
+
+    compute_black_threshold();
+
+    calibrated = true;
+
+    if (source_name == NULL) {
+        source_name = "unknown source";
+    }
+
+    printf("TCS3200 calibration loaded from %s.\n", source_name);
+
+    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
+        printf("%-5s ", profiles[color].name);
+        print_full_reading("", profiles[color].raw);
+    }
+
+    printf("Computed black clear threshold: %.1f Hz\n", black_clear_threshold);
+
+    return true;
+}
+
+static tcs_color_t classify_color_enum(color_reading_t reading)
+{
+    /*
+     * Black is mainly a low-brightness case.
+     * This pre-check makes black recognition more stable.
+     */
+    if (reading.clear < black_clear_threshold) {
+        return TCS_COLOR_BLACK;
     }
 
     color_feature_t current = extract_feature(reading);
 
-    /*
-     * First check whether the reading is close to background.
-     */
-    double d_none = feature_distance(current, profiles[TCS_COLOR_NONE].feature);
-
-    if (d_none < none_radius) {
-        return TCS_COLOR_NONE;
-    }
-
-    /*
-     * Then choose the closest real calibrated color.
-     */
     tcs_color_t best_color = TCS_COLOR_WHITE;
     double best_distance =
         feature_distance(current, profiles[TCS_COLOR_WHITE].feature);
 
-    for (int i = TCS_COLOR_BLACK; i < TCS_COLOR_COUNT; i++) {
+    /*
+     * Skip black here because black is already handled by brightness.
+     * This prevents noisy black hue ratios from interfering.
+     */
+    for (int i = 0; i < TCS_COLOR_COUNT; i++) {
+        if (i == TCS_COLOR_BLACK) {
+            continue;
+        }
+
         double d = feature_distance(current, profiles[i].feature);
 
         if (d < best_distance) {
@@ -518,10 +409,6 @@ static tcs_color_t classify_color_enum(color_reading_t reading)
     return best_color;
 }
 
-
-/*
- * Converts internal TCS color enum to the navigation/sample color enum.
- */
 static sample_color_t tcsColorToSampleColor(tcs_color_t color)
 {
     switch (color) {
@@ -540,28 +427,16 @@ static sample_color_t tcsColorToSampleColor(tcs_color_t color)
         case TCS_COLOR_BLUE:
             return COLOR_BLUE;
 
-        case TCS_COLOR_NONE:
         default:
             return COLOR_UNKNOWN;
     }
 }
 
-
-/*
- * Returns whether TCS3200 calibration has been successfully loaded.
- */
 bool isTCS3200Calibrated(void)
 {
     return calibrated;
 }
 
-
-/*
- * Classifies the current object/sample color.
- *
- * This should be used when the navigation code has already detected a front
- * object and wants to know its color.
- */
 sample_color_t classifyTCS3200Color(void)
 {
     if (!calibrated) {
@@ -573,25 +448,20 @@ sample_color_t classifyTCS3200Color(void)
 
     print_full_reading("TCS SAMPLE", reading);
 
+    if (reading.red <= 0.0 &&
+        reading.green <= 0.0 &&
+        reading.blue <= 0.0 &&
+        reading.clear <= 0.0) {
+
+        printf("TCS3200 no signal. Cannot classify color.\n");
+        return COLOR_UNKNOWN;
+    }
+
     tcs_color_t detected = classify_color_enum(reading);
 
     return tcsColorToSampleColor(detected);
 }
 
-
-/*
- * Detects whether the current TCS3200 reading matches the calibrated black
- * profile.
- *
- * Important:
- * This function only says "the sensor sees black".
- *
- * It does not prove that the black surface is tape.
- * The navigation layer must combine this with distance context:
- *
- *     black + no close front object -> black tape / cliff / boundary
- *     black + close front object    -> possible black rock sample
- */
 bool tcs3200DetectBlackTape(void)
 {
     if (!calibrated) {
@@ -603,11 +473,35 @@ bool tcs3200DetectBlackTape(void)
 
     print_full_reading("TCS TAPE", reading);
 
-    tcs_color_t detected = classify_color_enum(reading);
+    if (reading.red <= 0.0 &&
+        reading.green <= 0.0 &&
+        reading.blue <= 0.0 &&
+        reading.clear <= 0.0) {
 
-    return detected == TCS_COLOR_BLACK;
+        printf("TCS3200 no signal. Cannot detect black tape.\n");
+        return false;
+    }
+
+    return reading.clear < black_clear_threshold;
 }
 
+bool tcs3200LoadManualCalibration(
+    double white_r, double white_g, double white_b, double white_c,
+    double black_r, double black_g, double black_b, double black_c,
+    double red_r,   double red_g,   double red_b,   double red_c,
+    double green_r, double green_g, double green_b, double green_c,
+    double blue_r,  double blue_g,  double blue_b,  double blue_c)
+{
+    double values[20] = {
+        white_r, white_g, white_b, white_c,
+        black_r, black_g, black_b, black_c,
+        red_r,   red_g,   red_b,   red_c,
+        green_r, green_g, green_b, green_c,
+        blue_r,  blue_g,  blue_b,  blue_c
+    };
+
+    return tcs3200ApplyCalibrationValues(values, "manual values");
+}
 
 /*
  * Loads TCS3200 calibration profiles received from the base station.
@@ -615,16 +509,15 @@ bool tcs3200DetectBlackTape(void)
  * Expected message format:
  *
  *     TCSCAL,
- *     none_R,none_G,none_B,none_C,
  *     white_R,white_G,white_B,white_C,
  *     black_R,black_G,black_B,black_C,
  *     red_R,red_G,red_B,red_C,
  *     green_R,green_G,green_B,green_C,
  *     blue_R,blue_G,blue_B,blue_C
  *
- * There are 24 numeric values:
+ * There are 20 numeric values:
  *
- *     6 profiles * 4 channels = 24 values
+ *     5 profiles * 4 channels = 20 values
  */
 bool tcs3200LoadCalibrationFromBaseStation(const char *message)
 {
@@ -637,9 +530,9 @@ bool tcs3200LoadCalibrationFromBaseStation(const char *message)
     }
 
     const char *p = message + 7;
-    double values[24];
+    double values[20];
 
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 20; i++) {
         char *endptr;
 
         values[i] = strtod(p, &endptr);
@@ -657,95 +550,9 @@ bool tcs3200LoadCalibrationFromBaseStation(const char *message)
         }
     }
 
-    /*
-     * Store values in profile table.
-     *
-     * Order:
-     * none, white, black, red, green, blue
-     *
-     * Channels per color:
-     * R, G, B, C
-     */
-    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
-        int base = color * 4;
-
-        profiles[color].raw.red   = values[base + 0];
-        profiles[color].raw.green = values[base + 1];
-        profiles[color].raw.blue  = values[base + 2];
-        profiles[color].raw.clear = values[base + 3];
-    }
-
-    /*
-     * Check that real sample colors have some signal.
-     *
-     * The "none" background profile may be low, but the real color profiles
-     * should not all be exactly zero.
-     */
-    for (int color = TCS_COLOR_WHITE; color < TCS_COLOR_COUNT; color++) {
-        if (profiles[color].raw.red <= 0.0 &&
-            profiles[color].raw.green <= 0.0 &&
-            profiles[color].raw.blue <= 0.0 &&
-            profiles[color].raw.clear <= 0.0) {
-
-            printf("TCS calibration error: %s profile has no signal.\n",
-                   profiles[color].name);
-
-            calibrated = false;
-            return false;
-        }
-    }
-
-    /*
-     * Use calibrated white as brightness reference.
-     */
-    white_clear_reference = profiles[TCS_COLOR_WHITE].raw.clear;
-
-    if (white_clear_reference <= 0.0) {
-        white_clear_reference = 1.0;
-    }
-
-    /*
-     * Convert all raw calibration readings to normalized features.
-     */
-    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
-        profiles[color].feature = extract_feature(profiles[color].raw);
-    }
-
-    /*
-     * Compute the background/none radius.
-     */
-    compute_none_radius();
-
-    calibrated = true;
-
-    printf("TCS3200 calibration loaded from base station.\n");
-
-    for (int color = 0; color < TCS_COLOR_COUNT; color++) {
-        printf("%-5s ", profiles[color].name);
-        print_full_reading("", profiles[color].raw);
-    }
-
-    printf("Computed none radius: %.5f\n", none_radius);
-
-    return true;
+    return tcs3200ApplyCalibrationValues(values, "base station");
 }
 
-
-/*
- * Takes a raw calibration reading and prints/sends it in protocol format.
- *
- * Intended command from base station:
- *
- *     CAL_READ,red
- *
- * Response format:
- *
- *     CALRAW,red,R,G,B,C
- *
- * For now this function prints the payload.
- * Later, replace the printf with sendPayloadToESP32(payload), or call this
- * function from communication.c and send the returned/built payload there.
- */
 void tcs3200SendCalibrationReading(const char *color_name)
 {
     if (color_name == NULL) {
@@ -762,13 +569,6 @@ void tcs3200SendCalibrationReading(const char *color_name)
            reading.clear);
 }
 
-
-/*
- * Debug helper.
- *
- * Checks whether the TCS3200 OUT pin is toggling.
- * This helps detect wiring issues.
- */
 void tcs3200DebugOutPin(void)
 {
     printf("\nTesting TCS3200 OUT pin on AR8 for 3 seconds...\n");

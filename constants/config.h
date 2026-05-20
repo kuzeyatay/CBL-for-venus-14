@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define ROBOT_ID "R1"                  // Unique identifier for this robot. Use "R1" for robot 1 and "R2" for robot 2.
+#define ROBOT_ID "R81"                  // Unique identifier for this robot. Use "R81" for robot 1 and "R83" for robot 2.
 
 #define PI 3.14159265359               
 
@@ -25,7 +25,7 @@
                                        // Approximate conversion factor from raw stepper speed value to seconds per step.
                                        // This was tuned experimentally and is used in speedFromCmPerSec().
 
-#define USE_MOCK_SENSORS 1             // 1 = use scripted fake sensor readings for navigation testing.
+#define USE_MOCK_SENSORS 0             // 1 = use scripted fake sensor readings for navigation testing.
                                        // 0 = use real sensor-reading functions.
 
 #define MAP_SIZE 21                    // Number of cells in one row/column of the square internal map.
