@@ -591,5 +591,6 @@ float scanObjectWidth(void) {
            angular_width_deg,
            width_cm);
 
+        
     return width_cm;
 }

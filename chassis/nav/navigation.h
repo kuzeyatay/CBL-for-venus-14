@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "robot_types.h"
+#include "constants/robot_types.h"
 
 void runNavigation(void);
 

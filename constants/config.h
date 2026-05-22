@@ -37,10 +37,10 @@
 #define CELL_SIZE_CM 20.0              // Physical size of one grid cell in centimeters.
                                        // Continuous x/y odometry is converted into this grid.
 
-#define FORWARD_INCREMENT_CM 10.0      // Distance the robot moves forward in one navigation step.
+#define FORWARD_INCREMENT_CM 5.0      // Distance the robot moves forward in one navigation step.
                                        // Short increments make obstacle and tape detection safer.
 
-#define REVERSE_DISTANCE_CM 0.0        // Distance the robot reverses after detecting a hazard or sample.
+#define REVERSE_DISTANCE_CM 5.0        // Distance the robot reverses after detecting a hazard or sample.
                                        // Creates space before turning away.
 
 #define AVOID_TURN_DEG 90.0            // Default turn angle after detecting a cliff, boundary, hill, or obstacle.
@@ -49,7 +49,7 @@
 #define SAMPLE_AVOID_TURN_DEG 45.0     // Turn angle after detecting and reporting a rock sample.
                                        // Smaller than obstacle avoidance because the robot only needs to avoid pushing the sample.
 
-#define FRONT_OBJECT_THRESHOLD_MM 180  // Distance threshold for deciding that an object is close enough to react to.
+#define FRONT_OBJECT_THRESHOLD_MM 165  // Distance threshold for deciding that an object is close enough to react to.
                                        // If VL53L0X distance is below this value, the robot treats it as a nearby object.
 
 #define MAX_NAVIGATION_STEPS 80        // Maximum number of navigation-loop iterations during a test run.
@@ -66,15 +66,17 @@
 #define WIDTH_SCAN_TURN_SPEED 8.0      // Slow movement speed used during object-width scanning.
                                        // Slow turning improves scan stability.
 
-#define WIDTH_SCAN_DISTANCE_MARGIN_MM 100
+#define WIDTH_SCAN_DISTANCE_MARGIN_MM 30
                                        // Allowed distance variation while still treating the reading as the same object.
                                        // If distance changes too much, the object edge is assumed to be reached.
+
+#define MOVE_AFTER_SCAN_CM 5.5
 
 #define WIDTH_SCAN_AVERAGE_COUNT 2     // Number of VL53L0X readings averaged at each scan angle.
 
 #define VL53L0X_INVALID_DISTANCE_MM -1 // Invalid distance value returned when VL53L0X reading fails.
 
-#define VL53L0X_MAX_REASONABLE_MM 2000 // Maximum distance considered reasonable for this project.
+#define VL53L0X_MAX_REASONABLE_MM 2000 // Maximum distance considered reasonable .
                                        // Larger readings are treated as invalid/out of useful range.
 
 #define PIN_S0 IO_AR4                  // TCS3200 S0 pin: output-frequency scaling control.
@@ -93,5 +95,15 @@
 
 #define UART_PAYLOAD_MAX_SIZE 256      // Maximum number of characters allowed in one UART text payload.
                                        // Used for buffers when sending/receiving ESP32 messages.
+#define SAMPLE_COLOR_DISTANCE_MM 55
+#define SAMPLE_APPROACH_TOLERANCE_MM 5
+#define SAMPLE_APPROACH_MAX_CM 20.0
+#define SAMPLE_APPROACH_SPEED_CM_S 5.0
 
+#define POST_MOVE_SCAN_TOTAL_DEG 90.0
+#define POST_MOVE_SCAN_STEP_DEG 10.0
+#define POST_MOVE_SCAN_SPEED_CM_S 8.0
+#define POST_MOVE_SCAN_MAX_DISTANCE_MM 600
+#define POST_MOVE_SCAN_STOP_DISTANCE_MM FRONT_OBJECT_THRESHOLD_MM
+#define POST_MOVE_SCAN_APPROACH_MAX_CM FORWARD_INCREMENT_CM
 #endif

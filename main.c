@@ -2,14 +2,14 @@
 #include <stepper.h>
 #include <stdlib.h>
 
-#include "config.h"
-#include "odometry.h"
-#include "motion.h"
-#include "color_sensor.h"
-#include "distance_sensor.h"
-#include "temperature_sensor.h"
-#include "communication.h"
-#include "navigation.h"
+#include "constants/config.h"
+#include "chassis/odom/odometry.h"
+#include "chassis/drive/motion.h"
+#include "sensors/color/color_sensor.h"
+#include "sensors/distance/distance_sensor.h"
+#include "sensors/temperature/temperature_sensor.h"
+#include "comms/communication.h"
+#include "chassis/nav/navigation.h"
 
 int main(void)
 {
@@ -22,11 +22,11 @@ int main(void)
         tcs3200Init();
         tcs3200DebugOutPin();
         tcs3200LoadManualCalibration(
-            900.0, 920.0, 910.0, 950.0, // white
-            80.0, 85.0, 82.0, 90.0,     // black
-            700.0, 200.0, 180.0, 750.0, // red
-            220.0, 700.0, 250.0, 760.0, // green
-            180.0, 260.0, 720.0, 770.0  // blue
+            11739.3,8008.7,23974.0,8879.3, // white
+            4016.7,2398.7,7171.3,2604.0,     // black
+            10152.7,4464.0,13643.3,5047.3 , // red
+            7011.3,5428.7,13188.7 ,4685.3, // green
+            7796.0,4816.7,12952.0, 6043.3 // blue
         );
 
         initVL53L0X();
@@ -52,7 +52,7 @@ int main(void)
          * Do not immediately start navigation.
          * Wait for START_MISSION from base station instead.
          */
-        startMission(void);
+        startMission();
 
         while (1)
         {

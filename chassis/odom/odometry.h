@@ -1,7 +1,7 @@
 #ifndef ODOMETRY_H
 #define ODOMETRY_H
 
-#include "robot_types.h"
+#include "constants/robot_types.h"
 
 void odometryInit(float x, float y, float yaw);
 void updatePoseAfterMove(float distance_cm);

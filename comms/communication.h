@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "robot_types.h"
+#include "constants/robot_types.h"
 
 bool initESP32UART(void);
 bool sendPayloadToESP32(const char *payload);

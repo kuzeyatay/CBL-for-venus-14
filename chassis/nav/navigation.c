@@ -1,6 +1,7 @@
 #include <stdio.h>
-#include <math.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <math.h>
 
 #include "config.h"
 #include "robot_types.h"
@@ -9,10 +10,159 @@
 #include "sensor_manager.h"
 #include "communication.h"
 #include "navigation.h"
+#include "distance_sensor.h"
+#include "color_sensor.h"
+#include "temperature_sensor.h"
+
+static const char *colorToString(sample_color_t color);
 
 static bool mission_running = false;
 static cell_status_t map_grid[MAP_SIZE][MAP_SIZE];
+static bool isUsableDistance(int distance_mm)
+{
+    return distance_mm > 0 &&
+           distance_mm != VL53L0X_INVALID_DISTANCE_MM &&
+           distance_mm <= VL53L0X_MAX_REASONABLE_MM;
+}
 
+static void moveToDistanceFromObject(int target_distance_mm)
+{
+    int distance_mm = readVL53L0XDistance();
+
+    if (!isUsableDistance(distance_mm)) {
+        printf("Sample approach failed: invalid distance reading = %d mm\n",
+               distance_mm);
+        return;
+    }
+
+    int error_mm = distance_mm - target_distance_mm;
+
+    if (abs(error_mm) <= SAMPLE_APPROACH_TOLERANCE_MM) {
+        printf("Already close enough for color reading: %d mm\n", distance_mm);
+        return;
+    }
+
+    float move_cm = error_mm / 10.0f;
+
+    if (move_cm > SAMPLE_APPROACH_MAX_CM) {
+        move_cm = SAMPLE_APPROACH_MAX_CM;
+    }
+
+    if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
+        move_cm = -SAMPLE_APPROACH_MAX_CM;
+    }
+
+    printf("Moving %.2f cm to reach %d mm from sample. Current distance = %d mm\n",
+           move_cm,
+           target_distance_mm,
+           distance_mm);
+
+    moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
+    sendPoseUpdate();
+}
+
+static void finalizeRockSampleAtCloseRange(field_event_t *event)
+{
+    moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM);
+
+    event->distance_mm = readVL53L0XDistance();
+
+    if (isTCS3200Calibrated()) {
+        event->color = classifyTCS3200Color();
+    } else {
+        printf("Cannot classify rock color: TCS3200 is not calibrated.\n");
+        event->color = COLOR_UNKNOWN;
+    }
+
+    event->temperature_c = readNTCTemperature();
+
+    printf("Final rock sample reading: distance=%d mm, color=%s, temp=%.2f C\n",
+           event->distance_mm,
+           colorToString(event->color),
+           event->temperature_c);
+}
+
+static bool scanAfterForwardMoveAndApproachObject(void)
+{
+    float half_scan_deg = POST_MOVE_SCAN_TOTAL_DEG / 2.0f;
+    float current_angle_deg = 0.0f;
+    float best_angle_deg = 0.0f;
+    int best_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
+    bool found_object = false;
+
+    printf("Post-move scan started: total %.1f degrees\n",
+           POST_MOVE_SCAN_TOTAL_DEG);
+
+    turn(-half_scan_deg, POST_MOVE_SCAN_SPEED_CM_S);
+    current_angle_deg = -half_scan_deg;
+
+    while (current_angle_deg <= half_scan_deg + 0.01f) {
+        int distance_mm = readVL53L0XDistance();
+
+        printf("Post-move scan: angle=%.1f deg, distance=%d mm\n",
+               current_angle_deg,
+               distance_mm);
+
+        if (isUsableDistance(distance_mm) &&
+            distance_mm <= POST_MOVE_SCAN_MAX_DISTANCE_MM) {
+            if (!found_object || distance_mm < best_distance_mm) {
+                found_object = true;
+                best_distance_mm = distance_mm;
+                best_angle_deg = current_angle_deg;
+            }
+        }
+
+        if (current_angle_deg >= half_scan_deg) {
+            break;
+        }
+
+        float step_deg = POST_MOVE_SCAN_STEP_DEG;
+
+        if (current_angle_deg + step_deg > half_scan_deg) {
+            step_deg = half_scan_deg - current_angle_deg;
+        }
+
+        turn(step_deg, POST_MOVE_SCAN_SPEED_CM_S);
+        current_angle_deg += step_deg;
+    }
+
+    if (!found_object) {
+        printf("Post-move scan found no object. Returning to original heading.\n");
+        turn(-current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
+        sendPoseUpdate();
+        return false;
+    }
+
+    printf("Post-move scan found object: angle=%.1f deg, distance=%d mm\n",
+           best_angle_deg,
+           best_distance_mm);
+
+    turn(best_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
+
+    int current_distance_mm = readVL53L0XDistance();
+
+    if (isUsableDistance(current_distance_mm)) {
+        best_distance_mm = current_distance_mm;
+    }
+
+    int approach_mm = best_distance_mm - POST_MOVE_SCAN_STOP_DISTANCE_MM;
+
+    if (approach_mm > 0) {
+        float approach_cm = approach_mm / 10.0f;
+
+        if (approach_cm > POST_MOVE_SCAN_APPROACH_MAX_CM) {
+            approach_cm = POST_MOVE_SCAN_APPROACH_MAX_CM;
+        }
+
+        printf("Moving %.2f cm toward scanned object.\n", approach_cm);
+        moveWithRamp(approach_cm, DEFAULT_SPEED);
+    } else {
+        printf("Scanned object is already close enough. Not moving forward.\n");
+    }
+
+    sendPoseUpdate();
+    return true;
+}
 void startMission(void) {
     mission_running = true;
     sendStatusUpdate("navigating", "none");
@@ -99,13 +249,7 @@ static const char *eventToString(field_event_type_t event) {
     }
 }
 
-static bool isValidSampleColor(sample_color_t color) {
-    return color == COLOR_WHITE ||
-           color == COLOR_BLACK ||
-           color == COLOR_RED ||
-           color == COLOR_GREEN ||
-           color == COLOR_BLUE;
-}
+
 
 static bool estimateSampleSize(float width_cm, int *sample_size_cm) {
     if (fabs(width_cm - 3.0) <= 1.5) {
@@ -120,23 +264,22 @@ static bool estimateSampleSize(float width_cm, int *sample_size_cm) {
 
     return false;
 }
-
-static field_event_t interpretSensorData(sensor_data_t data) {
+static field_event_t interpretSensorData(sensor_data_t data)
+{
     field_event_t event;
 
     event.type = FIELD_CLEAR;
     event.distance_mm = data.front_distance_mm;
-    event.width_cm = data.estimated_width_cm;
     event.color = data.object_color;
-    event.sample_size_cm = 0;
     event.temperature_c = data.temperature_c;
+    event.sample_size_cm = 0;
 
     if (!data.valid) {
         event.type = FIELD_SENSOR_FAULT;
         return event;
     }
 
-    if (data.black_tape_detected && !data.front_object_detected) {
+    if (data.black_tape_detected) {
         event.type = FIELD_BLACK_TAPE;
         return event;
     }
@@ -146,11 +289,15 @@ static field_event_t interpretSensorData(sensor_data_t data) {
 
         int sample_size = 0;
 
-        if (isValidSampleColor(data.object_color) &&
-            estimateSampleSize(data.estimated_width_cm, &sample_size)) {
-
+        /*
+         * First classify by width.
+         * If the width looks like a 3 cm or 6 cm rock sample,
+         * then color classification happens later after approaching.
+         */
+        if (estimateSampleSize(data.estimated_width_cm, &sample_size)) {
             event.type = FIELD_ROCK_SAMPLE;
             event.sample_size_cm = sample_size;
+            event.color = COLOR_UNKNOWN;
             return event;
         }
 
@@ -158,7 +305,6 @@ static field_event_t interpretSensorData(sensor_data_t data) {
         return event;
     }
 
-    event.type = FIELD_CLEAR;
     return event;
 }
 
@@ -182,11 +328,19 @@ static void handleFieldEvent(field_event_t event) {
 
     switch (event.type) {
         case FIELD_CLEAR:
-            markCurrentCell(CELL_EXPLORED);
-            moveWithRamp(FORWARD_INCREMENT_CM, DEFAULT_SPEED);
-            markCurrentCell(CELL_EXPLORED);
-            sendPoseUpdate();
-            break;
+    markCurrentCell(CELL_EXPLORED);
+
+    moveWithRamp(FORWARD_INCREMENT_CM, DEFAULT_SPEED);
+    markCurrentCell(CELL_EXPLORED);
+    sendPoseUpdate();
+
+    /*
+     * After every normal forward movement, scan 160 degrees.
+     * If an object is visible, turn toward it and move closer.
+     */
+    scanAfterForwardMoveAndApproachObject();
+
+    break;
 
         case FIELD_BLACK_TAPE:
             markCellAhead(CELL_UNSAFE);
@@ -205,12 +359,21 @@ static void handleFieldEvent(field_event_t event) {
             break;
 
         case FIELD_ROCK_SAMPLE:
-            markCellAhead(CELL_SAMPLE);
-            reportFieldEvent(event);
-            moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
-            turn(SAMPLE_AVOID_TURN_DEG, DEFAULT_SPEED);
-            sendPoseUpdate();
-            break;
+    markCellAhead(CELL_SAMPLE);
+
+    /*
+     * The object has already been classified as a rock sample by width.
+     * Now move close enough for the TCS3200 color sensor, then classify color.
+     */
+    finalizeRockSampleAtCloseRange(&event);
+
+    reportFieldEvent(event);
+
+    moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
+    turn(SAMPLE_AVOID_TURN_DEG, DEFAULT_SPEED);
+    sendPoseUpdate();
+
+    break;
 
         case FIELD_SENSOR_FAULT:
             reportFieldEvent(event);
