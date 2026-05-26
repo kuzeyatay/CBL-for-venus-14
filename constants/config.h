@@ -40,16 +40,16 @@
 #define FORWARD_INCREMENT_CM 5.0      // Distance the robot moves forward in one navigation step.
                                        // Short increments make obstacle and tape detection safer.
 
-#define REVERSE_DISTANCE_CM 5.0        // Distance the robot reverses after detecting a hazard or sample.
+#define REVERSE_DISTANCE_CM 6.0        // Distance the robot reverses after detecting a hazard or sample.
                                        // Creates space before turning away.
 
 #define AVOID_TURN_DEG 90.0            // Default turn angle after detecting a cliff, boundary, hill, or obstacle.
                                        // 90 degrees makes the robot choose a clearly different direction.
 
-#define SAMPLE_AVOID_TURN_DEG 45.0     // Turn angle after detecting and reporting a rock sample.
+#define SAMPLE_AVOID_TURN_DEG 60.0     // Turn angle after detecting and reporting a rock sample.
                                        // Smaller than obstacle avoidance because the robot only needs to avoid pushing the sample.
 
-#define FRONT_OBJECT_THRESHOLD_MM 165  // Distance threshold for deciding that an object is close enough to react to.
+#define FRONT_OBJECT_THRESHOLD_MM 145  // Distance threshold for deciding that an object is close enough to react to.
                                        // If VL53L0X distance is below this value, the robot treats it as a nearby object.
 
 #define MAX_NAVIGATION_STEPS 80        // Maximum number of navigation-loop iterations during a test run.
@@ -57,22 +57,22 @@
 
 #define SENSOR_RETRY_COUNT 3           // Number of times to retry invalid sensor readings before declaring a sensor fault.
 
-#define WIDTH_SCAN_STEP_DEG 3.0        // Angle turned at each step during object-width scanning.
+#define WIDTH_SCAN_STEP_DEG 2.0        // Angle turned at each step during object-width scanning.
                                        // Smaller values give better width resolution but make scanning slower.
 
-#define WIDTH_SCAN_MAX_DEG 45.0        // Maximum scan angle to one side while searching for an object edge.
+#define WIDTH_SCAN_MAX_DEG 55.0        // Maximum scan angle to one side while searching for an object edge.
                                        // Prevents the robot from rotating too far during width estimation.
 
 #define WIDTH_SCAN_TURN_SPEED 8.0      // Slow movement speed used during object-width scanning.
                                        // Slow turning improves scan stability.
 
-#define WIDTH_SCAN_DISTANCE_MARGIN_MM 30
+#define WIDTH_SCAN_DISTANCE_MARGIN_MM 70
                                        // Allowed distance variation while still treating the reading as the same object.
                                        // If distance changes too much, the object edge is assumed to be reached.
 
 #define MOVE_AFTER_SCAN_CM 5.5
 
-#define WIDTH_SCAN_AVERAGE_COUNT 2     // Number of VL53L0X readings averaged at each scan angle.
+#define WIDTH_SCAN_AVERAGE_COUNT 4     // Number of VL53L0X readings averaged at each scan angle.
 
 #define VL53L0X_INVALID_DISTANCE_MM -1 // Invalid distance value returned when VL53L0X reading fails.
 
@@ -100,7 +100,7 @@
 #define SAMPLE_APPROACH_MAX_CM 20.0
 #define SAMPLE_APPROACH_SPEED_CM_S 5.0
 
-#define POST_MOVE_SCAN_TOTAL_DEG 90.0
+#define POST_MOVE_SCAN_TOTAL_DEG 60.0
 #define POST_MOVE_SCAN_STEP_DEG 10.0
 #define POST_MOVE_SCAN_SPEED_CM_S 8.0
 #define POST_MOVE_SCAN_MAX_DISTANCE_MM 600
