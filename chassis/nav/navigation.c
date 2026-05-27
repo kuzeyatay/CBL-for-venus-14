@@ -948,19 +948,30 @@ if (object_candidate) {
     }
 
 if (found_object) {
-    printf("Post-move scan found object: angle=%.1f deg, distance=%d mm\n",
+    printf("Post-move scan found object in unknown/reserved cell: angle=%.1f deg, distance=%d mm\n",
            best_angle_deg,
            best_distance_mm);
 
     /*
-     * Face the detected object, but do not classify it here.
-     * The post-move scan already found the object. Stop this cell movement
-     * and let the next navigation step decide what to do.
+     * Face the detected object.
      */
     turn(best_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
     sendPoseUpdate();
 
-    printf("Post-move scan stopped movement because an object is ahead. No width/color classification here.\n");
+    /*
+     * Now classify/handle it immediately.
+     * This will call readReliableSensorData(), which can start the width scan.
+     * Then interpretSensorData() decides rock_sample vs hill.
+     */
+    sensor_data_t sensor_data = readReliableSensorData();
+    field_event_t event = interpretSensorData(sensor_data);
+
+    if (event.type == FIELD_CLEAR) {
+        printf("Object was seen during post-move scan, but disappeared after turning. Replanning.\n");
+        return false;
+    }
+
+    handleBlockingFieldEvent(event);
 
     return false;
 }
