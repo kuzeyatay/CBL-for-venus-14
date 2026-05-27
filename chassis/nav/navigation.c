@@ -28,7 +28,7 @@ static const char *colorToString(sample_color_t color);
 static const char *eventToString(field_event_type_t event_type);
 static const char *cellStatusToString(cell_status_t status);
 
-static void markCellAhead(cell_status_t status);
+static void __attribute__((unused)) markCellAhead(cell_status_t status);
 static void markCurrentCell(cell_status_t status);
 static void reportFieldEvent(field_event_t event);
 static void handleBlockingFieldEvent(field_event_t event);
@@ -39,6 +39,7 @@ static void markRectangularFootprint(float center_distance_cm,
                                      float footprint_width_cm,
                                      float footprint_depth_cm,
                                      cell_status_t status);
+static void markSingleCellAtDistance(float center_distance_cm, cell_status_t status);
 static void markDetectedObjectFootprint(field_event_t event, cell_status_t status);
 static void markBlackTapeFootprint(void);
 
@@ -122,6 +123,7 @@ static bool getCurrentLocalCell(grid_cell_t *cell)
 
     return true;
 }
+
 static bool pointToLocalGridCell(float x_cm, float y_cm, grid_cell_t *cell)
 {
     int gx = 0;
@@ -170,41 +172,36 @@ static bool scanDetectionProjectsToInvestigatableCell(int distance_mm, grid_cell
         return false;
     }
 
-    /*
-     * Only investigate objects that project into unknown/reserved territory.
-     * If the object projects into an explored cell, it has already been covered
-     * and should not interrupt route-following through explored cells.
-     */
-if (map_grid[cell.x][cell.y] == CELL_RESERVED) {
-    int global_x = 0;
-    int global_y = 0;
+    if (map_grid[cell.x][cell.y] == CELL_RESERVED) {
+        int global_x = 0;
+        int global_y = 0;
 
-    missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
+        missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
 
-    printf("Scan candidate accepted: projected cell local=(%d,%d), global=(%d,%d), status=reserved. Object is inside the current target cell.\n",
-           cell.x,
-           cell.y,
-           global_x,
-           global_y);
+        printf("Scan candidate accepted: projected cell local=(%d,%d), global=(%d,%d), status=reserved. Object is inside the current target cell.\n",
+               cell.x,
+               cell.y,
+               global_x,
+               global_y);
 
-    return true;
-}
+        return true;
+    }
 
-if (map_grid[cell.x][cell.y] != CELL_UNKNOWN) {
-    int global_x = 0;
-    int global_y = 0;
+    if (map_grid[cell.x][cell.y] != CELL_UNKNOWN) {
+        int global_x = 0;
+        int global_y = 0;
 
-    missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
+        missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
 
-    printf("Scan candidate ignored: projected cell local=(%d,%d), global=(%d,%d), status=%s\n",
-           cell.x,
-           cell.y,
-           global_x,
-           global_y,
-           cellStatusToString(map_grid[cell.x][cell.y]));
+        printf("Scan candidate ignored: projected cell local=(%d,%d), global=(%d,%d), status=%s\n",
+               cell.x,
+               cell.y,
+               global_x,
+               global_y,
+               cellStatusToString(map_grid[cell.x][cell.y]));
 
-    return false;
-}
+        return false;
+    }
 
     return true;
 }
@@ -217,10 +214,27 @@ static void markCurrentCell(cell_status_t status)
         return;
     }
 
+    cell_status_t existing = map_grid[current.x][current.y];
+
+    /*
+     * Never overwrite known hazards or objects as explored.
+     * This prevents mapped samples/hills/unsafe cells from disappearing.
+     */
+    if (status == CELL_EXPLORED) {
+        if (existing == CELL_UNSAFE ||
+            existing == CELL_HILL ||
+            existing == CELL_SAMPLE) {
+            printf("Current cell not overwritten: local=(%d,%d), existing=%s\n",
+                   current.x,
+                   current.y,
+                   cellStatusToString(existing));
+            return;
+        }
+    }
+
     map_grid[current.x][current.y] = status;
     sendCellUpdate(current.x, current.y, status);
 }
-
 static void markCellAhead(cell_status_t status)
 {
     pose_t pose = getPose();
@@ -332,6 +346,55 @@ static void markRectangularFootprint(float center_distance_cm,
     }
 }
 
+static void markSingleCellAtDistance(float center_distance_cm, cell_status_t status)
+{
+    pose_t pose = getPose();
+    float yaw_rad = degToRad(pose.yaw);
+
+    float point_x = pose.x + center_distance_cm * cosf(yaw_rad);
+    float point_y = pose.y + center_distance_cm * sinf(yaw_rad);
+
+    grid_cell_t cell;
+
+    if (!pointToLocalGridCell(point_x, point_y, &cell)) {
+        printf("Single-cell footprint ignored: projected point outside map.\n");
+        return;
+    }
+
+    /*
+     * If the projected object cell is the robot's current cell, shift the mark
+     * one full cell ahead. This prevents the sample from disappearing because
+     * setMapCellStatus() protects the robot's current cell.
+     */
+    grid_cell_t current;
+
+    if (getCurrentLocalCell(&current)) {
+        if (cell.x == current.x && cell.y == current.y) {
+            float ahead_x = pose.x + CELL_SIZE_CM * cosf(yaw_rad);
+            float ahead_y = pose.y + CELL_SIZE_CM * sinf(yaw_rad);
+
+            if (!pointToLocalGridCell(ahead_x, ahead_y, &cell)) {
+                printf("Single-cell footprint fallback failed: ahead cell outside map.\n");
+                return;
+            }
+        }
+    }
+
+    int global_x = 0;
+    int global_y = 0;
+
+    missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
+
+    printf("Marking single-cell footprint: local=(%d,%d), global=(%d,%d), status=%s\n",
+           cell.x,
+           cell.y,
+           global_x,
+           global_y,
+           cellStatusToString(status));
+
+    setMapCellStatus(cell.x, cell.y, status);
+}
+
 static void markDetectedObjectFootprint(field_event_t event, cell_status_t status)
 {
     if (!isUsableDistance(event.distance_mm)) {
@@ -386,31 +449,19 @@ static void markDetectedObjectFootprint(field_event_t event, cell_status_t statu
     }
 
     if (status == CELL_SAMPLE) {
-        /*
-         * Samples are 3 cm or 6 cm cubes. Use the classified size when available.
-         * The margin makes sure a sample near a grid boundary still appears.
-         */
         float sample_size_cm = 6.0f;
 
         if (event.sample_size_cm == 3 || event.sample_size_cm == 6) {
             sample_size_cm = (float)event.sample_size_cm;
         }
 
-        float footprint_cm = sample_size_cm + SAMPLE_FOOTPRINT_MARGIN_CM;
+        /*
+         * VL53L0X distance is approximately to the front face.
+         * Mark the estimated center of the sample as one grid cell.
+         */
         float center_distance_cm = front_distance_cm + sample_size_cm / 2.0f;
 
-        /*
-         * Guarantee at least one grid cell is marked.
-         */
-        if (footprint_cm < CELL_SIZE_CM) {
-            footprint_cm = CELL_SIZE_CM;
-        }
-
-        markRectangularFootprint(center_distance_cm,
-                                 footprint_cm,
-                                 footprint_cm,
-                                 CELL_SAMPLE);
-
+        markSingleCellAtDistance(center_distance_cm, CELL_SAMPLE);
         return;
     }
 
@@ -845,57 +896,26 @@ static bool scanAfterForwardMoveAndApproachObject(void)
             }
         }
 
-        grid_cell_t projected_cell;
-bool projected_cell_ok = false;
+        bool object_candidate =
+            isUsableDistance(distance_mm) &&
+            distance_mm <= POST_MOVE_SCAN_MAX_DISTANCE_MM &&
+            distance_mm <= FRONT_OBJECT_THRESHOLD_MM &&
+            !black_tape_here;
 
-bool close_object_by_distance =
-    isUsableDistance(distance_mm) &&
-    distance_mm <= POST_MOVE_SCAN_MAX_DISTANCE_MM &&
-    distance_mm <= FRONT_OBJECT_THRESHOLD_MM &&
-    !black_tape_here;
+        printf("Post-move scan: angle=%.1f deg, distance=%d mm, black_tape=%s, object_candidate=%s\n",
+               current_angle_deg,
+               distance_mm,
+               black_tape_here ? "yes" : "no",
+               object_candidate ? "yes" : "no");
 
-bool object_candidate = false;
+        if (object_candidate) {
+            if (!found_object || distance_mm < best_distance_mm) {
+                found_object = true;
+                best_distance_mm = distance_mm;
+                best_angle_deg = current_angle_deg;
+            }
+        }
 
-if (close_object_by_distance) {
-    projected_cell_ok =
-        scanDetectionProjectsToInvestigatableCell(distance_mm, &projected_cell);
-
-    object_candidate = projected_cell_ok;
-}
-
-printf("Post-move scan: angle=%.1f deg, distance=%d mm, black_tape=%s, close_by_distance=%s, object_candidate=%s",
-       current_angle_deg,
-       distance_mm,
-       black_tape_here ? "yes" : "no",
-       close_object_by_distance ? "yes" : "no",
-       object_candidate ? "yes" : "no");
-
-if (close_object_by_distance && projected_cell_ok) {
-    int global_x = 0;
-    int global_y = 0;
-
-    missionFrameLocalGridIndexToGlobalCell(projected_cell.x,
-                                            projected_cell.y,
-                                            &global_x,
-                                            &global_y);
-
-    printf(", projected_cell local=(%d,%d), global=(%d,%d), status=%s",
-           projected_cell.x,
-           projected_cell.y,
-           global_x,
-           global_y,
-           cellStatusToString(map_grid[projected_cell.x][projected_cell.y]));
-}
-
-printf("\n");
-
-if (object_candidate) {
-    if (!found_object || distance_mm < best_distance_mm) {
-        found_object = true;
-        best_distance_mm = distance_mm;
-        best_angle_deg = current_angle_deg;
-    }
-}
         if (current_angle_deg >= half_scan_deg) {
             break;
         }
@@ -924,6 +944,7 @@ if (object_candidate) {
          * marks the unsafe cell in the detected tape direction.
          */
         turn(black_tape_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
+        sendPoseUpdate();
 
         field_event_t tape_event;
         tape_event.type = FIELD_BLACK_TAPE;
@@ -933,7 +954,7 @@ if (object_candidate) {
         tape_event.sample_size_cm = 0;
         tape_event.temperature_c = 0.0f;
 
-        markCellAhead(CELL_UNSAFE);
+        markBlackTapeFootprint();
         reportFieldEvent(tape_event);
 
         moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
@@ -948,32 +969,21 @@ if (object_candidate) {
     }
 
 if (found_object) {
-    printf("Post-move scan found object in unknown/reserved cell: angle=%.1f deg, distance=%d mm\n",
+    printf("Post-move scan saw possible object at angle=%.1f deg, distance=%d mm, but will not interrupt movement.\n",
            best_angle_deg,
            best_distance_mm);
 
+    printf("Object handling is left to checkImmediateSafety() while facing the target cell.\n");
+
     /*
-     * Face the detected object.
+     * Important:
+     * Return to the original heading. Do not turn toward side detections here.
+     * Otherwise the next planner step starts from a random-looking yaw.
      */
-    turn(best_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
+    turn(-current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
     sendPoseUpdate();
 
-    /*
-     * Now classify/handle it immediately.
-     * This will call readReliableSensorData(), which can start the width scan.
-     * Then interpretSensorData() decides rock_sample vs hill.
-     */
-    sensor_data_t sensor_data = readReliableSensorData();
-    field_event_t event = interpretSensorData(sensor_data);
-
-    if (event.type == FIELD_CLEAR) {
-        printf("Object was seen during post-move scan, but disappeared after turning. Replanning.\n");
-        return false;
-    }
-
-    handleBlockingFieldEvent(event);
-
-    return false;
+    return true;
 }
 
     printf("Post-move scan found no object and no black tape. Returning to original heading.\n");
@@ -1056,10 +1066,23 @@ static bool checkImmediateSafety(void)
         return true;
     }
 
+    /*
+     * For objects, do not re-handle something that projects into a known cell.
+     * This prevents already-explored samples/hills from being classified again
+     * while the robot is backtracking through explored cells.
+     */
+    if (event.type == FIELD_ROCK_SAMPLE || event.type == FIELD_HILL) {
+        grid_cell_t projected_cell;
+
+        if (!scanDetectionProjectsToInvestigatableCell(event.distance_mm, &projected_cell)) {
+            printf("Immediate object ignored because projected cell is already known or outside targetable area.\n");
+            return true;
+        }
+    }
+
     handleBlockingFieldEvent(event);
     return false;
 }
-
 static bool moveForwardOneCellWithSafety(void)
 {
     float remaining_cm = CELL_SIZE_CM;
@@ -1089,10 +1112,6 @@ static bool moveForwardOneCellWithSafety(void)
         }
 
         remaining_cm -= step_cm;
-
-        if (!checkImmediateSafety()) {
-            return false;
-        }
     }
 
     return true;
