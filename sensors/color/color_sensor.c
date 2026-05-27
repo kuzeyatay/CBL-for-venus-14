@@ -432,6 +432,18 @@ static sample_color_t tcsColorToSampleColor(tcs_color_t color)
     }
 }
 
+static const char *tcsColorToString(tcs_color_t color)
+{
+    switch (color) {
+        case TCS_COLOR_WHITE: return "white";
+        case TCS_COLOR_BLACK: return "black";
+        case TCS_COLOR_RED:   return "red";
+        case TCS_COLOR_GREEN: return "green";
+        case TCS_COLOR_BLUE:  return "blue";
+        default:              return "unknown";
+    }
+}
+
 bool isTCS3200Calibrated(void)
 {
     return calibrated;
@@ -446,18 +458,17 @@ sample_color_t classifyTCS3200Color(void)
 
     color_reading_t reading = tcs_read_color_average(3);
 
-    print_full_reading("TCS SAMPLE", reading);
-
     if (reading.red <= 0.0 &&
         reading.green <= 0.0 &&
         reading.blue <= 0.0 &&
         reading.clear <= 0.0) {
-
         printf("TCS3200 no signal. Cannot classify color.\n");
         return COLOR_UNKNOWN;
     }
 
     tcs_color_t detected = classify_color_enum(reading);
+
+    printf("TCS SAMPLE classified color: %s\n", tcsColorToString(detected));
 
     return tcsColorToSampleColor(detected);
 }
@@ -471,18 +482,22 @@ bool tcs3200DetectBlackTape(void)
 
     color_reading_t reading = tcs_read_color_average(3);
 
-    print_full_reading("TCS TAPE", reading);
-
     if (reading.red <= 0.0 &&
         reading.green <= 0.0 &&
         reading.blue <= 0.0 &&
         reading.clear <= 0.0) {
-
         printf("TCS3200 no signal. Cannot detect black tape.\n");
         return false;
     }
 
-    return reading.clear < black_clear_threshold;
+    tcs_color_t detected = classify_color_enum(reading);
+    bool black_tape_detected = reading.clear < black_clear_threshold;
+
+    printf("TCS TAPE classified color: %s | black_tape=%s\n",
+           tcsColorToString(detected),
+           black_tape_detected ? "yes" : "no");
+
+    return black_tape_detected;
 }
 
 bool tcs3200LoadManualCalibration(

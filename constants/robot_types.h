@@ -28,6 +28,7 @@ typedef enum {
 
 typedef enum {
     CELL_UNKNOWN,
+    CELL_RESERVED,
     CELL_EXPLORED,
     CELL_UNSAFE,
     CELL_HILL,
@@ -36,23 +37,18 @@ typedef enum {
 
 typedef struct {
     bool valid;
-
     bool black_tape_detected;
     bool front_object_detected;
-
     int front_distance_mm;
     float estimated_width_cm;
-
     sample_color_t object_color;
     float temperature_c;
 } sensor_data_t;
 
 typedef struct {
     field_event_type_t type;
-
     int distance_mm;
     float width_cm;
-
     sample_color_t color;
     int sample_size_cm;
     float temperature_c;

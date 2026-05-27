@@ -1,109 +1,126 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define ROBOT_ID "R81"                  // Unique identifier for this robot. Use "R81" for robot 1 and "R83" for robot 2.
+/*
+ * Robot identity
+ *
+ * Use the same code on both robots, but change these two constants before
+ * compiling/flashing each robot.
+ *
+ * Back-to-back mission convention:
+ *   - ROBOT_START_FRONT robot physically points toward the shared +X half.
+ *   - ROBOT_START_BACK  robot physically points toward the shared -X half.
+ *
+ * Internally both robots still use local odometry with yaw = 0 as "forward".
+ * The mission_frame module converts local coordinates to the shared GUI frame.
+ */
+#define ROBOT_ID "R81"                 /* Use "R81" for robot 1 and "R83" for robot 2. */
+#define ROBOT_START_FRONT 1
+#define ROBOT_START_BACK  2
+#define ROBOT_START_ORIENTATION ROBOT_START_FRONT
 
-#define PI 3.14159265359               
+/*
+ * Shared-frame start geometry.
+ * The shared GUI origin is the midpoint between the two robots at startup.
+ * With START_OFFSET_CELLS = 1:
+ *   FRONT robot starts at global cell (+1, 0).
+ *   BACK  robot starts at global cell (-1, 0).
+ * The global x = 0 column is the no-entry divider/buffer column.
+ */
+#define ROBOT_START_OFFSET_CELLS 1
+#define PARTITION_BUFFER_CELLS 0
+#define EXPLORATION_USE_STATIC_PARTITION 1
 
-#define WHEEL_DIAMETER_CM 8.0          // Diameter of the robot wheel in centimeters.
-#define STEPS_PER_ROTATION 1600.0      // Number of stepper-motor steps for one full wheel rotation.
+#define PI 3.14159265359f
+
+/* Stepper/geometry constants */
+#define WHEEL_DIAMETER_CM 8.0f
+#define STEPS_PER_ROTATION 1600.0f
 #define STEPS_PER_CM (STEPS_PER_ROTATION / (PI * WHEEL_DIAMETER_CM))
-                                       // Number of motor steps needed to move the robot by 1 cm.
-                                       // One wheel rotation moves the robot by pi * wheel diameter.
-                                       // Therefore: steps per cm = 1600 / wheel circumference.
+#define WHEEL_BASE_CM 12.5f
+#define TURN_RADIUS (WHEEL_BASE_CM / 2.0f)
 
-#define WHEEL_BASE_CM 12.5             // Distance between the left and right wheels in centimeters.
-#define TURN_RADIUS (WHEEL_BASE_CM / 2.0)
-                                       // Distance from the robot center to one wheel during an in-place turn.
+#define STEPPER_SPEED_MIN_VALUE 3024
+#define STEPPER_SPEED_MAX_VALUE 65535
+#define DEFAULT_SPEED 15.0f
+#define SECONDS_PER_SPEED_UNIT 0.00000009f
 
-#define STEPPER_SPEED_MIN_VALUE 3024   // Smallest allowed stepper speed value; physically the fastest speed.
-#define STEPPER_SPEED_MAX_VALUE 65535  // Largest allowed stepper speed value; physically the slowest speed.
+/* 1 = scripted fake readings, 0 = real sensors. */
+#define USE_MOCK_SENSORS 0
 
-#define DEFAULT_SPEED 15               // Default robot movement speed in cm/s.
+/* Grid exploration constants */
+#define MAP_SIZE 21
+#define MAP_CENTER (MAP_SIZE / 2)
+#define CELL_SIZE_CM 20.0f
+#define FORWARD_INCREMENT_CM 5.0f
+#define REVERSE_DISTANCE_CM 6.0f
+#define AVOID_TURN_DEG 90.0f
+#define SAMPLE_AVOID_TURN_DEG 60.0f
+#define MAX_NAVIGATION_STEPS 80
 
-#define SECONDS_PER_SPEED_UNIT 0.00000009
-                                       // Approximate conversion factor from raw stepper speed value to seconds per step.
-                                       // This was tuned experimentally and is used in speedFromCmPerSec().
+/* Sensor/navigation thresholds */
+#define FRONT_OBJECT_THRESHOLD_MM 115
+#define SENSOR_RETRY_COUNT 3
 
-#define USE_MOCK_SENSORS 0             // 1 = use scripted fake sensor readings for navigation testing.
-                                       // 0 = use real sensor-reading functions.
+#define WIDTH_SCAN_STEP_DEG 2.0f
+#define WIDTH_SCAN_MAX_DEG 55.0f
+#define WIDTH_SCAN_TURN_SPEED 8.0f
+#define WIDTH_SCAN_DISTANCE_MARGIN_MM 20
+#define MOVE_AFTER_SCAN_CM 5.5f
+#define WIDTH_SCAN_AVERAGE_COUNT 4
 
-#define MAP_SIZE 21                    // Number of cells in one row/column of the square internal map.
-                                       // Odd number gives a symmetric map around the center cell.
+#define VL53L0X_INVALID_DISTANCE_MM -1
+#define VL53L0X_MAX_REASONABLE_MM 2000
 
-#define MAP_CENTER (MAP_SIZE / 2)      // Index of the map center cell.
-                                       // The robot starts here because its absolute field position is unknown.
+/* TCS3200 pins */
+#define PIN_S0 IO_AR4
+#define PIN_S1 IO_AR5
+#define PIN_S2 IO_AR6
+#define PIN_S3 IO_AR7
+#define PIN_OUT IO_AR8
 
-#define CELL_SIZE_CM 7.0              // Physical size of one grid cell in centimeters.
-                                       // Continuous x/y odometry is converted into this grid.
+#define SAMPLE_TIME_MS 150
+#define AVERAGE_SAMPLE_COUNT 8
+#define SETTLE_TIME_MS 30
 
-#define FORWARD_INCREMENT_CM 5.0      // Distance the robot moves forward in one navigation step.
-                                       // Short increments make obstacle and tape detection safer.
+/* UART payload buffer */
+#define UART_PAYLOAD_MAX_SIZE 256
 
-#define REVERSE_DISTANCE_CM 6.0        // Distance the robot reverses after detecting a hazard or sample.
-                                       // Creates space before turning away.
-
-#define AVOID_TURN_DEG 90.0            // Default turn angle after detecting a cliff, boundary, hill, or obstacle.
-                                       // 90 degrees makes the robot choose a clearly different direction.
-
-#define SAMPLE_AVOID_TURN_DEG 60.0     // Turn angle after detecting and reporting a rock sample.
-                                       // Smaller than obstacle avoidance because the robot only needs to avoid pushing the sample.
-
-#define FRONT_OBJECT_THRESHOLD_MM 145  // Distance threshold for deciding that an object is close enough to react to.
-                                       // If VL53L0X distance is below this value, the robot treats it as a nearby object.
-
-#define MAX_NAVIGATION_STEPS 80        // Maximum number of navigation-loop iterations during a test run.
-                                       // Prevents the robot from running forever while debugging.
-
-#define SENSOR_RETRY_COUNT 3           // Number of times to retry invalid sensor readings before declaring a sensor fault.
-
-#define WIDTH_SCAN_STEP_DEG 2.0        // Angle turned at each step during object-width scanning.
-                                       // Smaller values give better width resolution but make scanning slower.
-
-#define WIDTH_SCAN_MAX_DEG 55.0        // Maximum scan angle to one side while searching for an object edge.
-                                       // Prevents the robot from rotating too far during width estimation.
-
-#define WIDTH_SCAN_TURN_SPEED 8.0      // Slow movement speed used during object-width scanning.
-                                       // Slow turning improves scan stability.
-
-#define WIDTH_SCAN_DISTANCE_MARGIN_MM 70
-                                       // Allowed distance variation while still treating the reading as the same object.
-                                       // If distance changes too much, the object edge is assumed to be reached.
-
-#define MOVE_AFTER_SCAN_CM 5.5
-
-#define WIDTH_SCAN_AVERAGE_COUNT 4     // Number of VL53L0X readings averaged at each scan angle.
-
-#define VL53L0X_INVALID_DISTANCE_MM -1 // Invalid distance value returned when VL53L0X reading fails.
-
-#define VL53L0X_MAX_REASONABLE_MM 2000 // Maximum distance considered reasonable .
-                                       // Larger readings are treated as invalid/out of useful range.
-
-#define PIN_S0 IO_AR4                  // TCS3200 S0 pin: output-frequency scaling control.
-#define PIN_S1 IO_AR5                  // TCS3200 S1 pin: output-frequency scaling control.
-#define PIN_S2 IO_AR6                  // TCS3200 S2 pin: color-filter selection control.
-#define PIN_S3 IO_AR7                  // TCS3200 S3 pin: color-filter selection control.
-#define PIN_OUT IO_AR8                 // TCS3200 OUT pin: square-wave frequency output from the sensor.
-
-#define SAMPLE_TIME_MS 150             // Time window used for one TCS3200 frequency measurement.
-                                       // Longer time gives more stable readings but slower sensing.
-
-#define AVERAGE_SAMPLE_COUNT 8         // Number of TCS3200 readings averaged during calibration.
-
-#define SETTLE_TIME_MS 30              // Delay after switching TCS3200 filter before measuring.
-                                       // Allows the sensor output to stabilize.
-
-#define UART_PAYLOAD_MAX_SIZE 256      // Maximum number of characters allowed in one UART text payload.
-                                       // Used for buffers when sending/receiving ESP32 messages.
+/* Sample approach and post-move scan constants */
 #define SAMPLE_COLOR_DISTANCE_MM 55
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
-#define SAMPLE_APPROACH_MAX_CM 20.0
-#define SAMPLE_APPROACH_SPEED_CM_S 5.0
+#define SAMPLE_APPROACH_MAX_CM 20.0f
+#define SAMPLE_APPROACH_SPEED_CM_S 5.0f
 
-#define POST_MOVE_SCAN_TOTAL_DEG 60.0
-#define POST_MOVE_SCAN_STEP_DEG 10.0
-#define POST_MOVE_SCAN_SPEED_CM_S 8.0
+#define POST_MOVE_SCAN_TOTAL_DEG 60.0f
+#define POST_MOVE_SCAN_STEP_DEG 10.0f
+#define POST_MOVE_SCAN_SPEED_CM_S 8.0f
 #define POST_MOVE_SCAN_MAX_DISTANCE_MM 600
 #define POST_MOVE_SCAN_STOP_DISTANCE_MM FRONT_OBJECT_THRESHOLD_MM
 #define POST_MOVE_SCAN_APPROACH_MAX_CM FORWARD_INCREMENT_CM
+
+#ifndef HILL_PHYSICAL_SIZE_CM
+#define HILL_PHYSICAL_SIZE_CM 30.0f
+#endif
+
+#ifndef HILL_FOOTPRINT_MARGIN_CM
+#define HILL_FOOTPRINT_MARGIN_CM 7.0f
+#endif
+
+#ifndef SAMPLE_FOOTPRINT_MARGIN_CM
+#define SAMPLE_FOOTPRINT_MARGIN_CM 2.0f
+#endif
+
+#ifndef BLACK_TAPE_FOOTPRINT_WIDTH_CM
+#define BLACK_TAPE_FOOTPRINT_WIDTH_CM 14.0f
+#endif
+
+#ifndef BLACK_TAPE_FOOTPRINT_DEPTH_CM
+#define BLACK_TAPE_FOOTPRINT_DEPTH_CM 7.0f
+#endif
+
+#ifndef BLACK_TAPE_FOOTPRINT_DISTANCE_CM
+#define BLACK_TAPE_FOOTPRINT_DISTANCE_CM 7.0f
+#endif
+
 #endif
