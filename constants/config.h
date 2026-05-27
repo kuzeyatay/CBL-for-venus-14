@@ -34,7 +34,7 @@
 #define MAP_CENTER (MAP_SIZE / 2)      // Index of the map center cell.
                                        // The robot starts here because its absolute field position is unknown.
 
-#define CELL_SIZE_CM 20.0              // Physical size of one grid cell in centimeters.
+#define CELL_SIZE_CM 7.0              // Physical size of one grid cell in centimeters.
                                        // Continuous x/y odometry is converted into this grid.
 
 #define FORWARD_INCREMENT_CM 5.0      // Distance the robot moves forward in one navigation step.
