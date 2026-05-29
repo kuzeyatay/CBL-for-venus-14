@@ -1,7 +1,7 @@
-#include <math.h>
-#include <stdbool.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "config.h"
 #include "robot_types.h"
@@ -10,52 +10,16 @@
 #include "sensor_manager.h"
 #include "communication.h"
 #include "navigation.h"
-#include "mission_frame.h"
 #include "distance_sensor.h"
 #include "color_sensor.h"
 #include "temperature_sensor.h"
 
-typedef struct {
-    int x;
-    int y;
-} grid_cell_t;
+static const char *colorToString(sample_color_t color);
+static void markCellAhead(cell_status_t status);
+static void reportFieldEvent(field_event_t event);
 
 static bool mission_running = false;
-static bool map_initialized = false;
 static cell_status_t map_grid[MAP_SIZE][MAP_SIZE];
-
-static const char *colorToString(sample_color_t color);
-static const char *eventToString(field_event_type_t event_type);
-static const char *cellStatusToString(cell_status_t status);
-
-static void __attribute__((unused)) markCellAhead(cell_status_t status);
-static void markCurrentCell(cell_status_t status);
-static void reportFieldEvent(field_event_t event);
-static void handleBlockingFieldEvent(field_event_t event);
-static bool scanAfterForwardMoveAndApproachObject(void);
-
-static void setMapCellStatus(int grid_x, int grid_y, cell_status_t status);
-static void markRectangularFootprint(float center_distance_cm,
-                                     float footprint_width_cm,
-                                     float footprint_depth_cm,
-                                     cell_status_t status);
-static void markSingleCellAtDistance(float center_distance_cm, cell_status_t status);
-static void markDetectedObjectFootprint(field_event_t event, cell_status_t status);
-static void markBlackTapeFootprint(void);
-
-static bool pointToLocalGridCell(float x_cm, float y_cm, grid_cell_t *cell);
-static bool scanDetectionProjectsToInvestigatableCell(int distance_mm, grid_cell_t *detected_cell);
-
-
-static bool cellsEqual(grid_cell_t a, grid_cell_t b)
-{
-    return a.x == b.x && a.y == b.y;
-}
-
-static bool isInsideMap(int x, int y)
-{
-    return x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE;
-}
 
 static bool isUsableDistance(int distance_mm)
 {
@@ -64,741 +28,20 @@ static bool isUsableDistance(int distance_mm)
            distance_mm <= VL53L0X_MAX_REASONABLE_MM;
 }
 
-static void initMapOnce(void)
+static bool isCloseFrontObjectDistance(int distance_mm)
 {
-    if (map_initialized) {
-        return;
-    }
-
-    for (int x = 0; x < MAP_SIZE; x++) {
-        for (int y = 0; y < MAP_SIZE; y++) {
-            map_grid[x][y] = CELL_UNKNOWN;
-        }
-    }
-
-    map_grid[MAP_CENTER][MAP_CENTER] = CELL_EXPLORED;
-    sendCellUpdate(MAP_CENTER, MAP_CENTER, CELL_EXPLORED);
-
-    map_initialized = true;
-
-    printf("Map initialized. Robot %s uses %s.\n",
-           ROBOT_ID,
-           missionFrameStartName());
+    return isUsableDistance(distance_mm) &&
+           distance_mm <= FRONT_OBJECT_THRESHOLD_MM;
 }
 
-static bool poseToLocalGridCell(float x_cm, float y_cm, int *grid_x, int *grid_y)
-{
-    int gx = MAP_CENTER + (int)roundf(x_cm / CELL_SIZE_CM);
-    int gy = MAP_CENTER + (int)roundf(y_cm / CELL_SIZE_CM);
-
-    if (!isInsideMap(gx, gy)) {
-        return false;
-    }
-
-    if (grid_x != NULL) {
-        *grid_x = gx;
-    }
-
-    if (grid_y != NULL) {
-        *grid_y = gy;
-    }
-
-    return true;
-}
-
-static bool getCurrentLocalCell(grid_cell_t *cell)
-{
-    pose_t pose = getPose();
-    int gx = 0;
-    int gy = 0;
-
-    if (!poseToLocalGridCell(pose.x, pose.y, &gx, &gy)) {
-        return false;
-    }
-
-    if (cell != NULL) {
-        cell->x = gx;
-        cell->y = gy;
-    }
-
-    return true;
-}
-
-static bool pointToLocalGridCell(float x_cm, float y_cm, grid_cell_t *cell)
-{
-    int gx = 0;
-    int gy = 0;
-
-    if (!poseToLocalGridCell(x_cm, y_cm, &gx, &gy)) {
-        return false;
-    }
-
-    if (cell != NULL) {
-        cell->x = gx;
-        cell->y = gy;
-    }
-
-    return true;
-}
-
-static bool scanDetectionProjectsToInvestigatableCell(int distance_mm, grid_cell_t *detected_cell)
-{
-    if (!isUsableDistance(distance_mm)) {
-        return false;
-    }
-
-    pose_t pose = getPose();
-    float yaw_rad = degToRad(pose.yaw);
-    float distance_cm = (float)distance_mm / 10.0f;
-
-    float detected_x_cm = pose.x + distance_cm * cosf(yaw_rad);
-    float detected_y_cm = pose.y + distance_cm * sinf(yaw_rad);
-
-    grid_cell_t cell;
-
-    if (!pointToLocalGridCell(detected_x_cm, detected_y_cm, &cell)) {
-        printf("Scan candidate ignored: projected point is outside map.\n");
-        return false;
-    }
-
-    if (detected_cell != NULL) {
-        *detected_cell = cell;
-    }
-
-    if (!missionFrameLocalGridIndexIsInAssignedHalf(cell.x, cell.y)) {
-        printf("Scan candidate ignored: projected cell local=(%d,%d) is outside assigned half.\n",
-               cell.x,
-               cell.y);
-        return false;
-    }
-
-    if (map_grid[cell.x][cell.y] == CELL_RESERVED) {
-        int global_x = 0;
-        int global_y = 0;
-
-        missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
-
-        printf("Scan candidate accepted: projected cell local=(%d,%d), global=(%d,%d), status=reserved. Object is inside the current target cell.\n",
-               cell.x,
-               cell.y,
-               global_x,
-               global_y);
-
-        return true;
-    }
-
-    if (map_grid[cell.x][cell.y] != CELL_UNKNOWN) {
-        int global_x = 0;
-        int global_y = 0;
-
-        missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
-
-        printf("Scan candidate ignored: projected cell local=(%d,%d), global=(%d,%d), status=%s\n",
-               cell.x,
-               cell.y,
-               global_x,
-               global_y,
-               cellStatusToString(map_grid[cell.x][cell.y]));
-
-        return false;
-    }
-
-    return true;
-}
-
-static void markCurrentCell(cell_status_t status)
-{
-    grid_cell_t current;
-
-    if (!getCurrentLocalCell(&current)) {
-        return;
-    }
-
-    cell_status_t existing = map_grid[current.x][current.y];
-
-    /*
-     * Never overwrite known hazards or objects as explored.
-     * This prevents mapped samples/hills/unsafe cells from disappearing.
-     */
-    if (status == CELL_EXPLORED) {
-        if (existing == CELL_UNSAFE ||
-            existing == CELL_HILL ||
-            existing == CELL_SAMPLE) {
-            printf("Current cell not overwritten: local=(%d,%d), existing=%s\n",
-                   current.x,
-                   current.y,
-                   cellStatusToString(existing));
-            return;
-        }
-    }
-
-    map_grid[current.x][current.y] = status;
-    sendCellUpdate(current.x, current.y, status);
-}
-static void markCellAhead(cell_status_t status)
-{
-    pose_t pose = getPose();
-    float yaw_rad = degToRad(pose.yaw);
-    float ahead_x = pose.x + CELL_SIZE_CM * cosf(yaw_rad);
-    float ahead_y = pose.y + CELL_SIZE_CM * sinf(yaw_rad);
-    int gx = 0;
-    int gy = 0;
-
-    if (!poseToLocalGridCell(ahead_x, ahead_y, &gx, &gy)) {
-        return;
-    }
-
-    map_grid[gx][gy] = status;
-    sendCellUpdate(gx, gy, status);
-}
-
-static void setMapCellStatus(int grid_x, int grid_y, cell_status_t status)
-{
-    if (!isInsideMap(grid_x, grid_y)) {
-        return;
-    }
-
-    /*
-     * Do not mark the robot's current cell as an obstacle/hazard.
-     * This prevents the robot from blocking itself in the planner.
-     */
-    grid_cell_t current;
-
-    if (getCurrentLocalCell(&current)) {
-        if (current.x == grid_x && current.y == grid_y &&
-            status != CELL_EXPLORED &&
-            status != CELL_RESERVED) {
-            return;
-        }
-    }
-
-    /*
-     * Preserve stronger hazard information.
-     * Unsafe cells should not be overwritten by hill/sample.
-     */
-    if (map_grid[grid_x][grid_y] == CELL_UNSAFE && status != CELL_UNSAFE) {
-        return;
-    }
-
-    /*
-     * Preserve hill cells against sample overwrite.
-     * A large obstacle should stay blocked.
-     */
-    if (map_grid[grid_x][grid_y] == CELL_HILL && status == CELL_SAMPLE) {
-        return;
-    }
-
-    map_grid[grid_x][grid_y] = status;
-    sendCellUpdate(grid_x, grid_y, status);
-}
-
-static void markRectangularFootprint(float center_distance_cm,
-                                     float footprint_width_cm,
-                                     float footprint_depth_cm,
-                                     cell_status_t status)
-{
-    pose_t pose = getPose();
-    float yaw_rad = degToRad(pose.yaw);
-
-    float forward_x = cosf(yaw_rad);
-    float forward_y = sinf(yaw_rad);
-
-    /*
-     * Left/right direction perpendicular to robot heading.
-     */
-    float lateral_x = -sinf(yaw_rad);
-    float lateral_y = cosf(yaw_rad);
-
-    float center_x = pose.x + center_distance_cm * forward_x;
-    float center_y = pose.y + center_distance_cm * forward_y;
-
-    float half_width = footprint_width_cm / 2.0f;
-    float half_depth = footprint_depth_cm / 2.0f;
-
-    printf("Marking footprint: center_distance=%.1f cm, width=%.1f cm, depth=%.1f cm, status=%d\n",
-           center_distance_cm,
-           footprint_width_cm,
-           footprint_depth_cm,
-           status);
-
-    /*
-     * Check every grid-cell center and mark the cells whose centers fall inside
-     * the estimated physical footprint rectangle.
-     */
-    for (int gx = 0; gx < MAP_SIZE; gx++) {
-        for (int gy = 0; gy < MAP_SIZE; gy++) {
-            float cell_center_x = (float)(gx - MAP_CENTER) * CELL_SIZE_CM;
-            float cell_center_y = (float)(gy - MAP_CENTER) * CELL_SIZE_CM;
-
-            float dx = cell_center_x - center_x;
-            float dy = cell_center_y - center_y;
-
-            float forward_projection = dx * forward_x + dy * forward_y;
-            float lateral_projection = dx * lateral_x + dy * lateral_y;
-
-            bool inside_depth = fabsf(forward_projection) <= half_depth;
-            bool inside_width = fabsf(lateral_projection) <= half_width;
-
-            if (inside_depth && inside_width) {
-                setMapCellStatus(gx, gy, status);
-            }
-        }
-    }
-}
-
-static void markSingleCellAtDistance(float center_distance_cm, cell_status_t status)
-{
-    pose_t pose = getPose();
-    float yaw_rad = degToRad(pose.yaw);
-
-    float point_x = pose.x + center_distance_cm * cosf(yaw_rad);
-    float point_y = pose.y + center_distance_cm * sinf(yaw_rad);
-
-    grid_cell_t cell;
-
-    if (!pointToLocalGridCell(point_x, point_y, &cell)) {
-        printf("Single-cell footprint ignored: projected point outside map.\n");
-        return;
-    }
-
-    /*
-     * If the projected object cell is the robot's current cell, shift the mark
-     * one full cell ahead. This prevents the sample from disappearing because
-     * setMapCellStatus() protects the robot's current cell.
-     */
-    grid_cell_t current;
-
-    if (getCurrentLocalCell(&current)) {
-        if (cell.x == current.x && cell.y == current.y) {
-            float ahead_x = pose.x + CELL_SIZE_CM * cosf(yaw_rad);
-            float ahead_y = pose.y + CELL_SIZE_CM * sinf(yaw_rad);
-
-            if (!pointToLocalGridCell(ahead_x, ahead_y, &cell)) {
-                printf("Single-cell footprint fallback failed: ahead cell outside map.\n");
-                return;
-            }
-        }
-    }
-
-    int global_x = 0;
-    int global_y = 0;
-
-    missionFrameLocalGridIndexToGlobalCell(cell.x, cell.y, &global_x, &global_y);
-
-    printf("Marking single-cell footprint: local=(%d,%d), global=(%d,%d), status=%s\n",
-           cell.x,
-           cell.y,
-           global_x,
-           global_y,
-           cellStatusToString(status));
-
-    setMapCellStatus(cell.x, cell.y, status);
-}
-
-static void markDetectedObjectFootprint(field_event_t event, cell_status_t status)
-{
-    if (!isUsableDistance(event.distance_mm)) {
-        /*
-         * Fallback: if the measured distance is invalid, use the old one-cell-ahead
-         * distance but still mark a footprint instead of one point.
-         */
-        if (status == CELL_HILL) {
-            markRectangularFootprint(CELL_SIZE_CM,
-                                     HILL_PHYSICAL_SIZE_CM + HILL_FOOTPRINT_MARGIN_CM,
-                                     HILL_PHYSICAL_SIZE_CM + HILL_FOOTPRINT_MARGIN_CM,
-                                     status);
-        } else {
-            markRectangularFootprint(CELL_SIZE_CM,
-                                     CELL_SIZE_CM,
-                                     CELL_SIZE_CM,
-                                     status);
-        }
-
-        return;
-    }
-
-    float front_distance_cm = (float)event.distance_mm / 10.0f;
-
-    if (status == CELL_HILL) {
-        /*
-         * A hill is at least 30 cm wide/deep according to the mission rules.
-         * If the width scan gives a larger apparent width, use that instead.
-         */
-        float width_cm = HILL_PHYSICAL_SIZE_CM;
-
-        if (event.width_cm > width_cm) {
-            width_cm = event.width_cm;
-        }
-
-        width_cm += HILL_FOOTPRINT_MARGIN_CM;
-
-        float depth_cm = HILL_PHYSICAL_SIZE_CM + HILL_FOOTPRINT_MARGIN_CM;
-
-        /*
-         * VL53L0X distance is approximately to the front face, so the center of
-         * the hill footprint is estimated half a depth behind that front face.
-         */
-        float center_distance_cm = front_distance_cm + depth_cm / 2.0f;
-
-        markRectangularFootprint(center_distance_cm,
-                                 width_cm,
-                                 depth_cm,
-                                 CELL_HILL);
-
-        return;
-    }
-
-    if (status == CELL_SAMPLE) {
-        float sample_size_cm = 6.0f;
-
-        if (event.sample_size_cm == 3 || event.sample_size_cm == 6) {
-            sample_size_cm = (float)event.sample_size_cm;
-        }
-
-        /*
-         * VL53L0X distance is approximately to the front face.
-         * Mark the estimated center of the sample as one grid cell.
-         */
-        float center_distance_cm = front_distance_cm + sample_size_cm / 2.0f;
-
-        markSingleCellAtDistance(center_distance_cm, CELL_SAMPLE);
-        return;
-    }
-
-    /*
-     * Generic fallback.
-     */
-    markRectangularFootprint(front_distance_cm,
-                             CELL_SIZE_CM,
-                             CELL_SIZE_CM,
-                             status);
-}
-
-static void markBlackTapeFootprint(void)
+static bool shouldTreatBlackReadingAsTape(bool black_detected, bool close_front_object_detected)
 {
     /*
-     * The TCS3200 sees tape close to the robot/front-bottom area.
-     * Model it as a short unsafe strip in front of the robot.
+     * A black rock sample can also make the TCS3200 return "black".
+     * Therefore, black is only interpreted as floor tape when there is no
+     * close object in front of the robot according to the VL53L0X.
      */
-    markRectangularFootprint(BLACK_TAPE_FOOTPRINT_DISTANCE_CM,
-                             BLACK_TAPE_FOOTPRINT_WIDTH_CM,
-                             BLACK_TAPE_FOOTPRINT_DEPTH_CM,
-                             CELL_UNSAFE);
-}
-
-static const char *colorToString(sample_color_t color)
-{
-    switch (color) {
-        case COLOR_WHITE: return "white";
-        case COLOR_BLACK: return "black";
-        case COLOR_RED: return "red";
-        case COLOR_GREEN: return "green";
-        case COLOR_BLUE: return "blue";
-        default: return "unknown";
-    }
-}
-
-static const char *eventToString(field_event_type_t event_type)
-{
-    switch (event_type) {
-        case FIELD_CLEAR: return "clear";
-        case FIELD_BLACK_TAPE: return "black_tape";
-        case FIELD_HILL: return "hill";
-        case FIELD_ROCK_SAMPLE: return "rock_sample";
-        case FIELD_SENSOR_FAULT: return "sensor_fault";
-        default: return "unknown";
-    }
-}
-
-static const char *cellStatusToString(cell_status_t status)
-{
-    switch (status) {
-        case CELL_UNKNOWN:  return "unknown";
-        case CELL_EXPLORED: return "explored";
-        case CELL_RESERVED: return "reserved";
-        case CELL_UNSAFE:   return "unsafe";
-        case CELL_HILL:     return "hill";
-        case CELL_SAMPLE:   return "sample";
-        default:            return "invalid";
-    }
-}
-
-static bool estimateSampleSize(float width_cm, int *sample_size_cm)
-{
-    /* Empirical thresholds for the VL53L0X width scan. Tune after tests. */
-    if (width_cm >= 1.5f && width_cm < 3.4f) {
-        *sample_size_cm = 3;
-        return true;
-    }
-
-    if (width_cm >= 3.4f && width_cm <= 7.5f) {
-        *sample_size_cm = 6;
-        return true;
-    }
-
-    return false;
-}
-
-static field_event_t interpretSensorData(sensor_data_t data)
-{
-    field_event_t event;
-
-    event.type = FIELD_CLEAR;
-    event.distance_mm = data.front_distance_mm;
-    event.width_cm = data.estimated_width_cm;
-    event.color = data.object_color;
-    event.sample_size_cm = 0;
-    event.temperature_c = data.temperature_c;
-
-    if (!data.valid) {
-        event.type = FIELD_SENSOR_FAULT;
-        return event;
-    }
-
-    if (data.black_tape_detected) {
-        event.type = FIELD_BLACK_TAPE;
-        event.color = COLOR_BLACK;
-        return event;
-    }
-
-    if (data.front_object_detected && data.front_distance_mm <= FRONT_OBJECT_THRESHOLD_MM) {
-        int sample_size = 0;
-
-         printf("VL53L0X distance trigger: %d mm is smaller than FRONT_OBJECT_THRESHOLD_MM=%d mm. Starting width scan.\n",
-           data.front_distance_mm,
-           FRONT_OBJECT_THRESHOLD_MM);
-
-        if (estimateSampleSize(data.estimated_width_cm, &sample_size)) {
-            event.type = FIELD_ROCK_SAMPLE;
-            event.sample_size_cm = sample_size;
-            event.color = COLOR_UNKNOWN;
-            return event;
-        }
-
-        event.type = FIELD_HILL;
-        return event;
-    }
-
-    return event;
-}
-
-static int headingToDirectionIndex(float yaw_deg)
-{
-    float yaw = normalizeAngle(yaw_deg);
-    int dir = (int)floorf((yaw + 45.0f) / 90.0f);
-    return dir % 4;
-}
-
-static float directionIndexToYaw(int direction_index)
-{
-    int dir = direction_index % 4;
-
-    if (dir < 0) {
-        dir += 4;
-    }
-
-    return (float)dir * 90.0f;
-}
-
-static float signedTurnErrorDeg(float target_yaw_deg, float current_yaw_deg)
-{
-    float diff = normalizeAngle(target_yaw_deg - current_yaw_deg);
-
-    if (diff > 180.0f) {
-        diff -= 360.0f;
-    }
-
-    return diff;
-}
-
-static int directionFromCellStep(grid_cell_t from, grid_cell_t to)
-{
-    int dx = to.x - from.x;
-    int dy = to.y - from.y;
-
-    if (dx == 1 && dy == 0) {
-        return 0;
-    }
-
-    if (dx == 0 && dy == 1) {
-        return 1;
-    }
-
-    if (dx == -1 && dy == 0) {
-        return 2;
-    }
-
-    if (dx == 0 && dy == -1) {
-        return 3;
-    }
-
-    return -1;
-}
-
-static bool isTraversableForPlanning(grid_cell_t cell)
-{
-    if (!isInsideMap(cell.x, cell.y)) {
-        return false;
-    }
-
-    if (!missionFrameLocalGridIndexIsInAssignedHalf(cell.x, cell.y)) {
-        return false;
-    }
-
-    return map_grid[cell.x][cell.y] == CELL_EXPLORED;
-}
-
-static bool isExplorationTarget(grid_cell_t cell)
-{
-    if (!isInsideMap(cell.x, cell.y)) {
-        return false;
-    }
-
-    if (!missionFrameLocalGridIndexIsInAssignedHalf(cell.x, cell.y)) {
-        return false;
-    }
-
-    return map_grid[cell.x][cell.y] == CELL_UNKNOWN;
-}
-
-static void getOrderedNeighborDirections(int base_direction, int ordered_dirs[4])
-{
-    ordered_dirs[0] = base_direction;
-    ordered_dirs[1] = (base_direction + 1) % 4;
-    ordered_dirs[2] = (base_direction + 3) % 4;
-    ordered_dirs[3] = (base_direction + 2) % 4;
-}
-
-static grid_cell_t neighborInDirection(grid_cell_t cell, int direction)
-{
-    static const int dx[4] = {1, 0, -1, 0};
-    static const int dy[4] = {0, 1, 0, -1};
-    grid_cell_t neighbor;
-
-    neighbor.x = cell.x + dx[direction];
-    neighbor.y = cell.y + dy[direction];
-
-    return neighbor;
-}
-
-static bool findNextCellTowardFrontier(grid_cell_t current, grid_cell_t *next_cell)
-{
-    bool visited[MAP_SIZE][MAP_SIZE] = {{false}};
-    grid_cell_t parent[MAP_SIZE][MAP_SIZE];
-    grid_cell_t queue[MAP_SIZE * MAP_SIZE];
-    int head = 0;
-    int tail = 0;
-    int ordered_dirs[4];
-    int base_dir = headingToDirectionIndex(getPose().yaw);
-
-    for (int x = 0; x < MAP_SIZE; x++) {
-        for (int y = 0; y < MAP_SIZE; y++) {
-            parent[x][y].x = -1;
-            parent[x][y].y = -1;
-        }
-    }
-
-    getOrderedNeighborDirections(base_dir, ordered_dirs);
-
-    visited[current.x][current.y] = true;
-    queue[tail] = current;
-    tail++;
-
-    while (head < tail) {
-        grid_cell_t cell = queue[head];
-        head++;
-
-        for (int i = 0; i < 4; i++) {
-            grid_cell_t neighbor = neighborInDirection(cell, ordered_dirs[i]);
-
-            if (!isInsideMap(neighbor.x, neighbor.y)) {
-                continue;
-            }
-
-            if (visited[neighbor.x][neighbor.y]) {
-                continue;
-            }
-
-            if (!missionFrameLocalGridIndexIsInAssignedHalf(neighbor.x, neighbor.y)) {
-                continue;
-            }
-
-            parent[neighbor.x][neighbor.y] = cell;
-            visited[neighbor.x][neighbor.y] = true;
-
-            if (isExplorationTarget(neighbor)) {
-    grid_cell_t frontier_target = neighbor;
-    grid_cell_t step = neighbor;
-    int path_length_cells = 1;
-
-    while (!cellsEqual(parent[step.x][step.y], current)) {
-        step = parent[step.x][step.y];
-        path_length_cells++;
-
-        if (step.x < 0 || step.y < 0) {
-            return false;
-        }
-    }
-
-    int current_global_x = 0;
-    int current_global_y = 0;
-    int step_global_x = 0;
-    int step_global_y = 0;
-    int target_global_x = 0;
-    int target_global_y = 0;
-
-    missionFrameLocalGridIndexToGlobalCell(current.x,
-                                            current.y,
-                                            &current_global_x,
-                                            &current_global_y);
-
-    missionFrameLocalGridIndexToGlobalCell(step.x,
-                                            step.y,
-                                            &step_global_x,
-                                            &step_global_y);
-
-    missionFrameLocalGridIndexToGlobalCell(frontier_target.x,
-                                            frontier_target.y,
-                                            &target_global_x,
-                                            &target_global_y);
-
-    printf("PLANNER DECISION:\n");
-    printf("  current cell: local=(%d,%d), global=(%d,%d), status=%s\n",
-           current.x,
-           current.y,
-           current_global_x,
-           current_global_y,
-           cellStatusToString(map_grid[current.x][current.y]));
-
-    printf("  nearest frontier target: local=(%d,%d), global=(%d,%d), status=%s\n",
-           frontier_target.x,
-           frontier_target.y,
-           target_global_x,
-           target_global_y,
-           cellStatusToString(map_grid[frontier_target.x][frontier_target.y]));
-
-    printf("  nextly decided step: local=(%d,%d), global=(%d,%d), status=%s, path_length=%d cell(s)\n",
-           step.x,
-           step.y,
-           step_global_x,
-           step_global_y,
-           cellStatusToString(map_grid[step.x][step.y]),
-           path_length_cells);
-
-    *next_cell = step;
-    return true;
-}
-
-            if (isTraversableForPlanning(neighbor)) {
-                if (tail < (MAP_SIZE * MAP_SIZE)) {
-                    queue[tail] = neighbor;
-                    tail++;
-                }
-            }
-        }
-    }
-
-    return false;
+    return black_detected && !close_front_object_detected;
 }
 
 static void moveToDistanceFromObject(int target_distance_mm)
@@ -806,7 +49,8 @@ static void moveToDistanceFromObject(int target_distance_mm)
     int distance_mm = readVL53L0XDistance();
 
     if (!isUsableDistance(distance_mm)) {
-        printf("Sample approach failed: invalid distance reading = %d mm\n", distance_mm);
+        printf("Sample approach failed: invalid distance reading = %d mm\n",
+               distance_mm);
         return;
     }
 
@@ -817,7 +61,7 @@ static void moveToDistanceFromObject(int target_distance_mm)
         return;
     }
 
-    float move_cm = (float)error_mm / 10.0f;
+    float move_cm = error_mm / 10.0f;
 
     if (move_cm > SAMPLE_APPROACH_MAX_CM) {
         move_cm = SAMPLE_APPROACH_MAX_CM;
@@ -861,6 +105,7 @@ static bool scanAfterForwardMoveAndApproachObject(void)
 {
     float half_scan_deg = POST_MOVE_SCAN_TOTAL_DEG / 2.0f;
     float current_angle_deg = 0.0f;
+
     float best_angle_deg = 0.0f;
     int best_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
     bool found_object = false;
@@ -871,58 +116,71 @@ static bool scanAfterForwardMoveAndApproachObject(void)
 
     printf("Post-move scan started: total %.1f degrees\n", POST_MOVE_SCAN_TOTAL_DEG);
 
-    if (!tape_scan_enabled) {
+    if (!tape_scan_enabled)
+    {
         printf("Post-move tape scan disabled: TCS3200 is not calibrated.\n");
     }
 
-    /*
-     * Scan symmetrically around the current heading.
-     * At the end of the scan, current_angle_deg stores where the robot is
-     * relative to the original heading.
-     */
     turn(-half_scan_deg, POST_MOVE_SCAN_SPEED_CM_S);
     current_angle_deg = -half_scan_deg;
 
-    while (current_angle_deg <= half_scan_deg + 0.01f) {
+    while (current_angle_deg <= half_scan_deg + 0.01f)
+    {
         int distance_mm = readVL53L0XDistance();
+        bool close_object_here = isCloseFrontObjectDistance(distance_mm);
+        bool raw_black_reading = false;
         bool black_tape_here = false;
 
-        if (tape_scan_enabled) {
-            black_tape_here = tcs3200DetectBlackTape();
+        if (tape_scan_enabled)
+        {
+            raw_black_reading = tcs3200DetectBlackTape();
+            black_tape_here = shouldTreatBlackReadingAsTape(raw_black_reading, close_object_here);
 
-            if (black_tape_here && !found_black_tape) {
+            if (raw_black_reading && close_object_here)
+            {
+                printf(
+                    "Post-move scan: black reading suppressed as tape because close object is present at %d mm.\n",
+                    distance_mm
+                );
+            }
+
+            if (black_tape_here && !found_black_tape)
+            {
                 found_black_tape = true;
                 black_tape_angle_deg = current_angle_deg;
             }
         }
 
-        bool object_candidate =
-            isUsableDistance(distance_mm) &&
-            distance_mm <= POST_MOVE_SCAN_MAX_DISTANCE_MM &&
-            distance_mm <= FRONT_OBJECT_THRESHOLD_MM &&
-            !black_tape_here;
+        bool object_candidate = close_object_here;
 
-        printf("Post-move scan: angle=%.1f deg, distance=%d mm, black_tape=%s, object_candidate=%s\n",
-               current_angle_deg,
-               distance_mm,
-               black_tape_here ? "yes" : "no",
-               object_candidate ? "yes" : "no");
+        printf(
+            "Post-move scan: angle=%.1f deg, distance=%d mm, raw_black=%s, black_tape=%s, object_candidate=%s\n",
+            current_angle_deg,
+            distance_mm,
+            raw_black_reading ? "yes" : "no",
+            black_tape_here ? "yes" : "no",
+            object_candidate ? "yes" : "no"
+        );
 
-        if (object_candidate) {
-            if (!found_object || distance_mm < best_distance_mm) {
+        if (object_candidate)
+        {
+            if (!found_object || distance_mm < best_distance_mm)
+            {
                 found_object = true;
                 best_distance_mm = distance_mm;
                 best_angle_deg = current_angle_deg;
             }
         }
 
-        if (current_angle_deg >= half_scan_deg) {
+        if (current_angle_deg >= half_scan_deg)
+        {
             break;
         }
 
         float step_deg = POST_MOVE_SCAN_STEP_DEG;
 
-        if (current_angle_deg + step_deg > half_scan_deg) {
+        if (current_angle_deg + step_deg > half_scan_deg)
+        {
             step_deg = half_scan_deg - current_angle_deg;
         }
 
@@ -931,20 +189,22 @@ static bool scanAfterForwardMoveAndApproachObject(void)
     }
 
     /*
-     * Safety priority:
-     * If black tape was seen anywhere during the scan, avoid it first.
-     * Do not approach an object when black tape was detected in the same scan.
+     * Safety priority still applies, but only for confirmed floor tape.
+     * If the black reading happened while a close object was visible, it is
+     * treated as a possible black rock sample/object instead of tape.
      */
-    if (found_black_tape) {
-        printf("Post-move scan found black tape: angle=%.1f deg. Avoiding instead of approaching.\n",
-               black_tape_angle_deg);
+    if (found_black_tape)
+    {
+        printf(
+            "Post-move scan found confirmed black tape: angle=%.1f deg. Avoiding instead of approaching.\n",
+            black_tape_angle_deg
+        );
 
         /*
          * Face the direction where the tape was detected, so markCellAhead()
          * marks the unsafe cell in the detected tape direction.
          */
         turn(black_tape_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
-        sendPoseUpdate();
 
         field_event_t tape_event;
         tape_event.type = FIELD_BLACK_TAPE;
@@ -954,70 +214,272 @@ static bool scanAfterForwardMoveAndApproachObject(void)
         tape_event.sample_size_cm = 0;
         tape_event.temperature_c = 0.0f;
 
-        markBlackTapeFootprint();
+        markCellAhead(CELL_UNSAFE);
         reportFieldEvent(tape_event);
 
         moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
         turn(AVOID_TURN_DEG, DEFAULT_SPEED);
-        sendPoseUpdate();
 
-        /*
-         * Return false because the robot did not continue safely toward the
-         * reserved cell. The cell-exploration step should stop here and replan.
-         */
+        sendPoseUpdate();
         return false;
     }
 
-if (found_object) {
-    printf("Post-move scan saw possible object at angle=%.1f deg, distance=%d mm, but will not interrupt movement.\n",
-           best_angle_deg,
-           best_distance_mm);
+    if (found_object)
+    {
+        printf(
+            "Post-move scan found object: angle=%.1f deg, distance=%d mm\n",
+            best_angle_deg,
+            best_distance_mm
+        );
 
-    printf("Object handling is left to checkImmediateSafety() while facing the target cell.\n");
+        turn(best_angle_deg - current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
 
-    /*
-     * Important:
-     * Return to the original heading. Do not turn toward side detections here.
-     * Otherwise the next planner step starts from a random-looking yaw.
-     */
-    turn(-current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
-    sendPoseUpdate();
+        int current_distance_mm = readVL53L0XDistance();
 
-    return true;
-}
+        if (isUsableDistance(current_distance_mm))
+        {
+            best_distance_mm = current_distance_mm;
+        }
+
+        int approach_mm = best_distance_mm - POST_MOVE_SCAN_STOP_DISTANCE_MM;
+
+        if (approach_mm > 0)
+        {
+            float approach_cm = approach_mm / 10.0f;
+
+            if (approach_cm > POST_MOVE_SCAN_APPROACH_MAX_CM)
+            {
+                approach_cm = POST_MOVE_SCAN_APPROACH_MAX_CM;
+            }
+
+            printf("Moving %.2f cm toward scanned object.\n", approach_cm);
+            moveWithRamp(approach_cm, DEFAULT_SPEED);
+        }
+        else
+        {
+            printf("Scanned object is already close enough. Not moving forward.\n");
+        }
+
+        sendPoseUpdate();
+        return true;
+    }
 
     printf("Post-move scan found no object and no black tape. Returning to original heading.\n");
     turn(-current_angle_deg, POST_MOVE_SCAN_SPEED_CM_S);
     sendPoseUpdate();
 
-    /*
-     * Return true because nothing interrupted the cell-to-cell movement.
-     */
+    return false;
+}
+
+void startMission(void) {
+    mission_running = true;
+    sendStatusUpdate("navigating", "none");
+}
+
+void stopMission(void) {
+    mission_running = false;
+    sendStatusUpdate("stopped", "none");
+}
+
+bool isMissionRunning(void) {
+    return mission_running;
+}
+
+static void initMap(void) {
+    for (int x = 0; x < MAP_SIZE; x++) {
+        for (int y = 0; y < MAP_SIZE; y++) {
+            map_grid[x][y] = CELL_UNKNOWN;
+        }
+    }
+
+    map_grid[MAP_CENTER][MAP_CENTER] = CELL_EXPLORED;
+}
+
+static bool poseToGridCell(float x_cm, float y_cm, int *grid_x, int *grid_y) {
+    int gx = MAP_CENTER + (int)round(x_cm / CELL_SIZE_CM);
+    int gy = MAP_CENTER + (int)round(y_cm / CELL_SIZE_CM);
+
+    if (gx < 0 || gx >= MAP_SIZE || gy < 0 || gy >= MAP_SIZE) {
+        return false;
+    }
+
+    *grid_x = gx;
+    *grid_y = gy;
     return true;
 }
 
+static void markCurrentCell(cell_status_t status) {
+    pose_t pose = getPose();
 
-static void reportFieldEvent(field_event_t event)
+    int gx, gy;
+
+    if (poseToGridCell(pose.x, pose.y, &gx, &gy)) {
+        map_grid[gx][gy] = status;
+        sendCellUpdate(gx, gy, status);
+    }
+}
+
+static void markCellAhead(cell_status_t status) {
+    pose_t pose = getPose();
+
+    float yaw_rad = degToRad(pose.yaw);
+
+    float ahead_x = pose.x + CELL_SIZE_CM * cos(yaw_rad);
+    float ahead_y = pose.y + CELL_SIZE_CM * sin(yaw_rad);
+
+    int gx, gy;
+
+    if (poseToGridCell(ahead_x, ahead_y, &gx, &gy)) {
+        map_grid[gx][gy] = status;
+        sendCellUpdate(gx, gy, status);
+    }
+}
+
+static const char *colorToString(sample_color_t color) {
+    switch (color) {
+        case COLOR_WHITE: return "white";
+        case COLOR_BLACK: return "black";
+        case COLOR_RED: return "red";
+        case COLOR_GREEN: return "green";
+        case COLOR_BLUE: return "blue";
+        default: return "unknown";
+    }
+}
+
+static const char *eventToString(field_event_type_t event) {
+    switch (event) {
+        case FIELD_CLEAR: return "clear";
+        case FIELD_BLACK_TAPE: return "black_tape";
+        case FIELD_HILL: return "hill";
+        case FIELD_ROCK_SAMPLE: return "rock_sample";
+        case FIELD_SENSOR_FAULT: return "sensor_fault";
+        default: return "unknown";
+    }
+}
+
+static bool estimateSampleSize(float width_cm, int *sample_size_cm)
 {
-    printf("REPORT: robot=%s, event=%s, distance=%d mm, width=%.2f cm, color=%s, size=%d cm, temp=%.2f C\n",
-           ROBOT_ID,
-           eventToString(event.type),
-           event.distance_mm,
-           event.width_cm,
-           colorToString(event.color),
-           event.sample_size_cm,
-           event.temperature_c);
+    /*
+     * These thresholds are empirical for this robot.
+     * The VL53L0X width scan underestimates real cube width because the robot
+     * rotates around its wheel axis, not around the distance sensor itself.
+     */
+
+    if (width_cm >= 1.5f && width_cm < 3.4f)
+    {
+        *sample_size_cm = 3;
+        return true;
+    }
+
+    if (width_cm >= 3.4f && width_cm <= 7.5f)
+    {
+        *sample_size_cm = 6;
+        return true;
+    }
+
+    return false;
+}
+
+static field_event_t interpretSensorData(sensor_data_t data)
+{
+    field_event_t event;
+
+    event.type = FIELD_CLEAR;
+    event.distance_mm = data.front_distance_mm;
+    event.width_cm = data.estimated_width_cm;
+    event.color = data.object_color;
+    event.sample_size_cm = 0;
+    event.temperature_c = data.temperature_c;
+
+    if (!data.valid)
+    {
+        event.type = FIELD_SENSOR_FAULT;
+        return event;
+    }
+
+    bool close_front_object =
+        data.front_object_detected &&
+        isCloseFrontObjectDistance(data.front_distance_mm);
+
+    bool confirmed_black_tape =
+        shouldTreatBlackReadingAsTape(data.black_tape_detected, close_front_object);
+
+    if (data.black_tape_detected && close_front_object)
+    {
+        printf(
+            "Black reading ignored as tape because a close front object is present: distance=%d mm, width=%.2f cm\n",
+            data.front_distance_mm,
+            data.estimated_width_cm
+        );
+    }
+
+    /*
+     * A black object in front of the robot must not be classified as tape.
+     * Therefore, object handling is allowed before black-tape handling when
+     * VL53L0X confirms a close front object.
+     */
+    if (close_front_object)
+    {
+        int sample_size = 0;
+
+        if (estimateSampleSize(data.estimated_width_cm, &sample_size))
+        {
+            event.type = FIELD_ROCK_SAMPLE;
+            event.sample_size_cm = sample_size;
+            event.color = COLOR_UNKNOWN;
+            return event;
+        }
+
+        event.type = FIELD_HILL;
+        return event;
+    }
+
+    if (confirmed_black_tape)
+    {
+        event.type = FIELD_BLACK_TAPE;
+        return event;
+    }
+
+    return event;
+}
+
+static void reportFieldEvent(field_event_t event) {
+    printf(
+        "REPORT: robot=%s, event=%s, distance=%d mm, width=%.2f cm, color=%s, size=%d cm, temp=%.2f C\n",
+        ROBOT_ID,
+        eventToString(event.type),
+        event.distance_mm,
+        event.width_cm,
+        colorToString(event.color),
+        event.sample_size_cm,
+        event.temperature_c
+    );
 
     sendFieldEventUpdate(event);
 }
 
-static void handleBlockingFieldEvent(field_event_t event)
-{
-    printf("Blocking event: %s\n", eventToString(event.type));
+static void handleFieldEvent(field_event_t event) {
+    printf("Navigation received event: %s\n", eventToString(event.type));
 
     switch (event.type) {
+        case FIELD_CLEAR:
+            markCurrentCell(CELL_EXPLORED);
+
+            moveWithRamp(FORWARD_INCREMENT_CM, DEFAULT_SPEED);
+            markCurrentCell(CELL_EXPLORED);
+            sendPoseUpdate();
+
+            /*
+             * After every normal forward movement, scan around the robot.
+             * If black tape is visible, avoid it.
+             * If no black tape is visible but a close object is visible, approach it.
+             */
+            scanAfterForwardMoveAndApproachObject();
+
+            break;
+
         case FIELD_BLACK_TAPE:
-            markBlackTapeFootprint();
+            markCellAhead(CELL_UNSAFE);
             reportFieldEvent(event);
             moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
             turn(AVOID_TURN_DEG, DEFAULT_SPEED);
@@ -1025,7 +487,7 @@ static void handleBlockingFieldEvent(field_event_t event)
             break;
 
         case FIELD_HILL:
-            markDetectedObjectFootprint(event, CELL_HILL);
+            markCellAhead(CELL_HILL);
             reportFieldEvent(event);
             moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
             turn(AVOID_TURN_DEG, DEFAULT_SPEED);
@@ -1033,16 +495,20 @@ static void handleBlockingFieldEvent(field_event_t event)
             break;
 
         case FIELD_ROCK_SAMPLE:
+            markCellAhead(CELL_SAMPLE);
+
             /*
-             * First move to the sample and classify it.
-             * Then use the final distance and sample size to mark the footprint.
+             * The object has already been classified as a rock sample by width.
+             * Now move close enough for the TCS3200 color sensor, then classify color.
              */
             finalizeRockSampleAtCloseRange(&event);
-            markDetectedObjectFootprint(event, CELL_SAMPLE);
+
             reportFieldEvent(event);
+
             moveWithRamp(-REVERSE_DISTANCE_CM, DEFAULT_SPEED);
             turn(SAMPLE_AVOID_TURN_DEG, DEFAULT_SPEED);
             sendPoseUpdate();
+
             break;
 
         case FIELD_SENSOR_FAULT:
@@ -1051,176 +517,30 @@ static void handleBlockingFieldEvent(field_event_t event)
             sendStatusUpdate("fault", "sensor_fault");
             break;
 
-        case FIELD_CLEAR:
         default:
+            sendErrorMessage("unknown_event");
             break;
     }
 }
 
-static bool checkImmediateSafety(void)
-{
-    sensor_data_t sensor_data = readReliableSensorData();
-    field_event_t event = interpretSensorData(sensor_data);
+void runNavigation(void) {
+    initMap();
 
-    if (event.type == FIELD_CLEAR) {
-        return true;
-    }
+    printf("Starting autonomous navigation...\n");
 
-    /*
-     * For objects, do not re-handle something that projects into a known cell.
-     * This prevents already-explored samples/hills from being classified again
-     * while the robot is backtracking through explored cells.
-     */
-    if (event.type == FIELD_ROCK_SAMPLE || event.type == FIELD_HILL) {
-        grid_cell_t projected_cell;
-
-        if (!scanDetectionProjectsToInvestigatableCell(event.distance_mm, &projected_cell)) {
-            printf("Immediate object ignored because projected cell is already known or outside targetable area.\n");
-            return true;
-        }
-    }
-
-    handleBlockingFieldEvent(event);
-    return false;
-}
-static bool moveForwardOneCellWithSafety(void)
-{
-    float remaining_cm = CELL_SIZE_CM;
-
-    while (remaining_cm > 0.01f && mission_running) {
-        float step_cm = FORWARD_INCREMENT_CM;
-
-        if (step_cm > remaining_cm) {
-            step_cm = remaining_cm;
-        }
-
-        if (!checkImmediateSafety()) {
-            return false;
-        }
-
-        moveWithRamp(step_cm, DEFAULT_SPEED);
-        sendPoseUpdate();
-
-        /*
-         * Restore the old behavior: after every normal forward increment,
-         * scan around the robot. If the scan sees black tape, it avoids it.
-         * If the scan sees an object, it turns/approaches it and the current
-         * cell movement stops so the next navigation step can classify it.
-         */
-        if (!scanAfterForwardMoveAndApproachObject()) {
-            return false;
-        }
-
-        remaining_cm -= step_cm;
-    }
-
-    return true;
-}
-
-static bool moveToAdjacentCell(grid_cell_t current, grid_cell_t target)
-{
-    int direction = directionFromCellStep(current, target);
-
-    if (direction < 0) {
-        sendErrorMessage("non_adjacent_target");
-        return false;
-    }
-
-    float target_yaw = directionIndexToYaw(direction);
-    float turn_deg = signedTurnErrorDeg(target_yaw, getPose().yaw);
-
-    if (fabsf(turn_deg) > 1.0f) {
-        turn(turn_deg, DEFAULT_SPEED);
-        sendPoseUpdate();
-    }
-
-    if (map_grid[target.x][target.y] == CELL_UNKNOWN) {
-        map_grid[target.x][target.y] = CELL_RESERVED;
-        sendCellUpdate(target.x, target.y, CELL_RESERVED);
-    }
-
-    if (!moveForwardOneCellWithSafety()) {
-        return false;
-    }
-
-    markCurrentCell(CELL_EXPLORED);
-    return true;
-}
-
-static void executeOneExplorationStep(void)
-{
-    grid_cell_t current;
-    grid_cell_t next;
-    int global_x = 0;
-    int global_y = 0;
-
-    if (!getCurrentLocalCell(&current)) {
-        sendErrorMessage("pose_out_of_map");
-        stopMission();
-        return;
-    }
-
-    markCurrentCell(CELL_EXPLORED);
-
-    missionFrameLocalGridIndexToGlobalCell(current.x, current.y, &global_x, &global_y);
-    printf("Current local cell=(%d,%d), global cell=(%d,%d)\n",
-           current.x,
-           current.y,
-           global_x,
-           global_y);
-
-    if (!findNextCellTowardFrontier(current, &next)) {
-        printf("No reachable unexplored cell remains in assigned half.\n");
-        sendStatusUpdate("side_complete", "none");
-        stopMission();
-        return;
-    }
-
-    missionFrameLocalGridIndexToGlobalCell(next.x, next.y, &global_x, &global_y);
-printf("Next local cell=(%d,%d), global cell=(%d,%d), status=%d\n",
-       next.x,
-       next.y,
-       global_x,
-       global_y,
-       map_grid[next.x][next.y]);
-
-    (void)moveToAdjacentCell(current, next);
-}
-
-void startMission(void)
-{
-    initMapOnce();
-    mission_running = true;
-    sendStatusUpdate("navigating", "none");
-}
-
-void stopMission(void)
-{
-    mission_running = false;
-    sendStatusUpdate("stopped", "none");
-}
-
-bool isMissionRunning(void)
-{
-    return mission_running;
-}
-
-void runNavigation(void)
-{
-    initMapOnce();
-
-    printf("Starting cell-by-cell autonomous navigation for %s.\n", ROBOT_ID);
     mission_running = true;
 
     for (int step = 0; step < MAX_NAVIGATION_STEPS && mission_running; step++) {
         pollESP32Messages();
 
-        printf("\n--- Cell exploration step %d ---\n", step);
+        printf("\n--- Navigation step %d ---\n", step);
         printPose();
-        sendPoseUpdate();
 
-        executeOneExplorationStep();
+        sensor_data_t sensor_data = readReliableSensorData();
+        field_event_t event = interpretSensorData(sensor_data);
+
+        handleFieldEvent(event);
     }
 
-    printf("Navigation loop finished.\n");
+    printf("Navigation finished.\n");
 }
