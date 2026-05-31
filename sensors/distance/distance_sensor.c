@@ -502,11 +502,15 @@ static bool scanStillSeesObject(int distance_mm, int center_distance_mm) {
         return false;
     }
 
+    if (distance_mm < FRONT_OBJECT_MIN_DISTANCE_MM) {
+        return false;
+    }
+
     if (abs(distance_mm - center_distance_mm) > WIDTH_SCAN_DISTANCE_MARGIN_MM) {
         return false;
     }
 
-    if (distance_mm > FRONT_OBJECT_THRESHOLD_MM + WIDTH_SCAN_DISTANCE_MARGIN_MM) {
+    if (distance_mm > FRONT_OBJECT_MAX_DISTANCE_MM + WIDTH_SCAN_DISTANCE_MARGIN_MM) {
         return false;
     }
 
@@ -552,9 +556,12 @@ float scanObjectWidth(void) {
         return 0.0;
     }
 
-    if (center_distance_mm > FRONT_OBJECT_THRESHOLD_MM + WIDTH_SCAN_DISTANCE_MARGIN_MM) {
-        printf("Width scan failed: object is too far away. Distance=%d mm\n",
-               center_distance_mm);
+    if (center_distance_mm < FRONT_OBJECT_MIN_DISTANCE_MM ||
+        center_distance_mm > FRONT_OBJECT_MAX_DISTANCE_MM) {
+        printf("Width scan failed: center distance outside object window. Distance=%d mm, window=%d..%d mm\n",
+               center_distance_mm,
+               FRONT_OBJECT_MIN_DISTANCE_MM,
+               FRONT_OBJECT_MAX_DISTANCE_MM);
         return 0.0;
     }
 

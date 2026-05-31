@@ -1,0 +1,5 @@
+white raw: R= 4827.3 G= 3963.3 B=12613.3 C= 4573.3 | feature: r=0.226 g=0.185 b=0.589 bright=1.000
+black raw: R=  902.7 G=  589.3 B= 1708.0 C=  702.7 | feature: r=0.282 g=0.184 b=0.534 bright=0.154
+red   raw: R= 3263.3 G= 1065.3 B= 4438.7 C= 1352.7 | feature: r=0.372 g=0.122 b=0.506 bright=0.296
+green raw: R= 1964.0 G= 2082.7 B= 4868.0 C= 1427.3 | feature: r=0.220 g=0.234 b=0.546 bright=0.312
+blue  raw: R= 1830.7 G= 1353.3 B= 4518.7 C= 2391.3 | feature: r=0.238 g=0.176 b=0.587 bright=0.523

@@ -47,8 +47,8 @@ static sensor_data_t readSensorDataReal(void)
     data.front_distance_mm = readVL53L0XDistance();
 
     data.front_object_detected =
-        data.front_distance_mm < FRONT_OBJECT_THRESHOLD_MM &&
-        data.front_distance_mm > 0;
+        data.front_distance_mm >= FRONT_OBJECT_MIN_DISTANCE_MM &&
+        data.front_distance_mm <= FRONT_OBJECT_MAX_DISTANCE_MM;
 
     /*
      * Only use the TCS3200 for black-tape detection when there is no close

@@ -1,8 +1,11 @@
 #ifndef MOTION_H
 #define MOTION_H
 
+#include <stdbool.h>
+
 int speedFromCmPerSec(float cm_per_sec);
 
+void setGyroTurnFeedbackEnabled(bool enabled);
 void moveWithRamp(float distance_cm, float speed_cm_s);
 void move(float distance_cm, float speed_cm_s);
 void turn(float angle_deg, float speed_cm_s);

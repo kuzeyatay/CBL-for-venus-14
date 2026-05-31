@@ -10,5 +10,5 @@ main.o: main.c ../..//library/libpynq.h ../..//library/adc.h \
  ../..//library/stepper.h constants/config.h chassis/odom/odometry.h \
  constants/robot_types.h chassis/drive/motion.h \
  sensors/color/color_sensor.h sensors/distance/distance_sensor.h \
- sensors/temperature/temperature_sensor.h comms/communication.h \
- chassis/nav/navigation.h
+ sensors/gyro/gyro_sensor.h sensors/temperature/temperature_sensor.h \
+ comms/communication.h chassis/nav/navigation.h

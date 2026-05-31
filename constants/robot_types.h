@@ -28,6 +28,7 @@ typedef enum {
 
 typedef enum {
     CELL_UNKNOWN,
+    CELL_SCANNED_CLEAR,
     CELL_RESERVED,
     CELL_EXPLORED,
     CELL_UNSAFE,

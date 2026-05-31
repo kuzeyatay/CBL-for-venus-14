@@ -1,7 +1,10 @@
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#include <libpynq.h>
 
 #include "config.h"
 #include "robot_types.h"
@@ -10,10 +13,63 @@
 #include "mission_frame.h"
 #include "communication.h"
 
+#define ESP32_UART UART0
+#define ESP32_UART_RX_PIN IO_AR0
+#define ESP32_UART_TX_PIN IO_AR1
+#define ESP32_UART_READY_PIN IO_AR3
+
+#define ESP32_TX_READY_TIMEOUT_MS 50
+#define ESP32_RX_BYTE_TIMEOUT_MS 10
+
+static bool esp32_uart_initialized = false;
+
+static bool waitForESP32Ready(void)
+{
+    for (int elapsed_ms = 0;
+         elapsed_ms < ESP32_TX_READY_TIMEOUT_MS;
+         elapsed_ms++) {
+        if (gpio_get_level(ESP32_UART_READY_PIN) != GPIO_LEVEL_LOW) {
+            return true;
+        }
+
+        sleep_msec(1);
+    }
+
+    return false;
+}
+
+static void drainESP32UART(void)
+{
+    while (uart_has_data(ESP32_UART)) {
+        (void)uart_recv(ESP32_UART);
+    }
+}
+
+static bool readUARTByteWithTimeout(uint8_t *byte)
+{
+    if (byte == NULL) {
+        return false;
+    }
+
+    for (int elapsed_ms = 0;
+         elapsed_ms < ESP32_RX_BYTE_TIMEOUT_MS;
+         elapsed_ms++) {
+        if (uart_has_data(ESP32_UART)) {
+            *byte = (uint8_t)uart_recv(ESP32_UART);
+            return true;
+        }
+
+        sleep_msec(1);
+    }
+
+    return false;
+}
+
 static const char *cellStatusToString(cell_status_t status)
 {
     switch (status) {
         case CELL_UNKNOWN: return "unknown";
+        case CELL_SCANNED_CLEAR: return "scanned_clear";
         case CELL_RESERVED: return "reserved";
         case CELL_EXPLORED: return "explored";
         case CELL_UNSAFE: return "unsafe";
@@ -49,29 +105,103 @@ static const char *colorToString(sample_color_t color)
 
 bool initESP32UART(void)
 {
-    /*
-     * TODO: Replace this placeholder with real libpynq UART initialization.
-     * The rest of the communication module already builds the text payloads
-     * that should be wrapped as: [4 bytes payload_length][payload bytes].
-     */
-    return false;
+    switchbox_set_pin(ESP32_UART_RX_PIN, SWB_UART0_RX);
+    switchbox_set_pin(ESP32_UART_TX_PIN, SWB_UART0_TX);
+    gpio_set_direction(ESP32_UART_READY_PIN, GPIO_DIR_INPUT);
+
+    uart_init(ESP32_UART);
+    uart_reset_fifos(ESP32_UART);
+
+    esp32_uart_initialized = true;
+    printf("ESP32 UART initialized: RX=AR0, TX=AR1, ready=AR3\n");
+    return true;
 }
 
 bool sendPayloadToESP32(const char *payload)
 {
+    uint32_t len = 0;
+
     if (payload == NULL) {
         return false;
     }
 
     printf("UART OUT: %s\n", payload);
+
+    if (!esp32_uart_initialized) {
+        printf("UART warning: ESP32 UART not initialized; payload not sent.\n");
+        return false;
+    }
+
+    len = (uint32_t)strlen(payload);
+
+    if (len == 0 || len >= UART_PAYLOAD_MAX_SIZE) {
+        printf("UART warning: invalid payload length %u\n", (unsigned int)len);
+        return false;
+    }
+
+    if (!waitForESP32Ready()) {
+        printf("UART warning: ESP32 not ready on AR3; skipped payload.\n");
+        return false;
+    }
+
+    uart_send(ESP32_UART, (uint8_t)(len & 0xFF));
+    uart_send(ESP32_UART, (uint8_t)((len >> 8) & 0xFF));
+    uart_send(ESP32_UART, (uint8_t)((len >> 16) & 0xFF));
+    uart_send(ESP32_UART, (uint8_t)((len >> 24) & 0xFF));
+
+    for (uint32_t i = 0; i < len; i++) {
+        uart_send(ESP32_UART, (uint8_t)payload[i]);
+    }
+
     return true;
 }
 
 bool receivePayloadFromESP32(char *buffer, int buffer_size)
 {
-    (void)buffer;
-    (void)buffer_size;
-    return false;
+    uint32_t len = 0;
+
+    if (!esp32_uart_initialized || buffer == NULL || buffer_size <= 1) {
+        return false;
+    }
+
+    if (!uart_has_data(ESP32_UART)) {
+        return false;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t byte = 0;
+
+        if (!readUARTByteWithTimeout(&byte)) {
+            printf("UART warning: timeout while reading payload length.\n");
+            drainESP32UART();
+            return false;
+        }
+
+        len |= (uint32_t)byte << (i * 8);
+    }
+
+    if (len == 0 || len >= (uint32_t)buffer_size) {
+        printf("UART warning: invalid incoming payload length %u\n",
+               (unsigned int)len);
+        drainESP32UART();
+        return false;
+    }
+
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t byte = 0;
+
+        if (!readUARTByteWithTimeout(&byte)) {
+            printf("UART warning: timeout while reading payload body.\n");
+            drainESP32UART();
+            return false;
+        }
+
+        buffer[i] = (char)byte;
+    }
+
+    buffer[len] = '\0';
+    printf("UART IN: %s\n", buffer);
+    return true;
 }
 
 bool pollESP32Messages(void)
@@ -92,17 +222,21 @@ void handleBaseStationMessage(const char *message)
         return;
     }
 
-    if (strcmp(message, "START_MISSION") == 0) {
+    if (strcmp(message, "START_MISSION") == 0 ||
+        strncmp(message, "START_MISSION,", 14) == 0) {
         startMission();
+        sendPayloadToESP32("MISSION_STARTED," ROBOT_ID);
         return;
     }
 
-    if (strcmp(message, "STOP_MISSION") == 0) {
+    if (strcmp(message, "STOP_MISSION") == 0 ||
+        strncmp(message, "STOP_MISSION,", 13) == 0) {
         stopMission();
         return;
     }
 
-    if (strcmp(message, "PING") == 0) {
+    if (strcmp(message, "PING") == 0 ||
+        strncmp(message, "PING,", 5) == 0) {
         sendPayloadToESP32("PONG," ROBOT_ID);
         return;
     }

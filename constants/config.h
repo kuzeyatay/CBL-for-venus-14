@@ -45,21 +45,84 @@
 #define DEFAULT_SPEED 15.0f
 #define SECONDS_PER_SPEED_UNIT 0.00000009f
 
+/* Gyro-assisted turning */
+#define GYRO_TURN_ENABLED 1
+#define GYRO_CALIBRATION_SAMPLES 500
+#define GYRO_DEADBAND_DPS 0.20f
+/*
+ * Gyro scale correction:
+ *   correction = physical_turn_deg / gyro_reported_turn_deg
+ *
+ * 1.200 made the robot physically under-turn, while 1.100 made it physically
+ * over-turn. 1.165 is a small increase from the midpoint to reduce the
+ * remaining physical overshoot.
+ */
+#define GYRO_Z_SCALE_CORRECTION 1.165f
+#define GYRO_TURN_TOLERANCE_DEG 0.5f
+#define GYRO_TURN_FINE_SKIP_DEG 1.0f
+#define GYRO_TURN_MAX_CHUNK_DEG 5.0f
+#define GYRO_TURN_MIN_CHUNK_DEG 0.6f
+#define GYRO_TURN_UPDATE_INTERVAL_MS 2
+#define GYRO_TURN_SETTLE_MS 100
+#define GYRO_TURN_MAX_ITERATIONS 120
+#define GYRO_TURN_MAX_STALE_CHUNKS 3
+
 /* 1 = scripted fake readings, 0 = real sensors. */
 #define USE_MOCK_SENSORS 0
 
 /* Grid exploration constants */
-#define MAP_SIZE 21
+#define MAP_SIZE 25
 #define MAP_CENTER (MAP_SIZE / 2)
-#define CELL_SIZE_CM 20.0f
+#define CELL_SIZE_CM 15.0f
 #define FORWARD_INCREMENT_CM 5.0f
 #define REVERSE_DISTANCE_CM 6.0f
+#define ROBOT_LENGTH_CM 22.0f
+#define ROBOT_WIDTH_CM 13.0f
+/*
+ * Robot footprint on 15 cm cells:
+ *   length 22 cm -> half length 11 cm, protrudes beyond a 15 cm cell -> 1 cell
+ *   width  13 cm -> half width  6.5 cm, fits within a 15 cm cell -> 0 cells
+ *
+ * V1 uses a heading-aligned 3x1 footprint for target clearance:
+ * target cell plus one cell in front and one behind along travel direction.
+ */
+#define ROBOT_FOOTPRINT_MARGIN_CELLS 1
+#define ROBOT_FOOTPRINT_SIDE_MARGIN_CELLS 0
+#define REVERSE_TO_CELL_ALIGNMENT_TOLERANCE_DEG 35.0f
 #define AVOID_TURN_DEG 90.0f
 #define SAMPLE_AVOID_TURN_DEG 60.0f
 #define MAX_NAVIGATION_STEPS 80
+#define CELL_CENTER_REACHED_TOLERANCE_CM 2.0f
+
+/*
+ * Course manual rule: do not assume the robot's initial location or heading
+ * inside the black-tape boundary.  The map is intentionally larger than a
+ * 4x6 A4 test field; navigation should discover boundaries from tape.
+ */
+#define SCAN_360_STEP_DEG 20.0f
+#define SCAN_DISTANCE_READINGS_PER_ANGLE 4
+#define SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS 4
+#define SCAN_CLEAR_MIN_READINGS 1
+#define SCAN_OBJECT_MIN_READINGS 1
+#define SCAN_TAPE_MIN_READINGS 1
+
+#define MOVE_DISTANCE_READINGS_PER_CHECK 4
+#define MOVE_OBJECT_MIN_CLOSE_READINGS 4
+#define INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION 4
+#define INVESTIGATE_OBJECT_MIN_CLOSE_READINGS 4
+
+#define HILL_PHYSICAL_SIZE_CM 30.0f
+#define HILL_FOOTPRINT_MARGIN_CELLS 1
+#define SAMPLE_FOOTPRINT_MARGIN_CELLS 0
+
+#define NAV_DEBUG_STATE 1
+#define NAV_DEBUG_SCAN360 1
+#define NAV_DEBUG_DFS 1
 
 /* Sensor/navigation thresholds */
-#define FRONT_OBJECT_THRESHOLD_MM 115
+#define FRONT_OBJECT_MIN_DISTANCE_MM 100
+#define FRONT_OBJECT_MAX_DISTANCE_MM 180
+#define FRONT_OBJECT_THRESHOLD_MM FRONT_OBJECT_MAX_DISTANCE_MM
 #define SENSOR_RETRY_COUNT 3
 
 #define WIDTH_SCAN_STEP_DEG 2.0f
@@ -98,10 +161,6 @@
 #define POST_MOVE_SCAN_MAX_DISTANCE_MM 600
 #define POST_MOVE_SCAN_STOP_DISTANCE_MM FRONT_OBJECT_THRESHOLD_MM
 #define POST_MOVE_SCAN_APPROACH_MAX_CM FORWARD_INCREMENT_CM
-
-#ifndef HILL_PHYSICAL_SIZE_CM
-#define HILL_PHYSICAL_SIZE_CM 30.0f
-#endif
 
 #ifndef HILL_FOOTPRINT_MARGIN_CM
 #define HILL_FOOTPRINT_MARGIN_CM 7.0f

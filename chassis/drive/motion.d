@@ -7,5 +7,5 @@ chassis/drive/motion.o: chassis/drive/motion.c ../..//library/libpynq.h \
  ../..//library/pwm.h ../..//library/switchbox.h ../..//library/uart.h \
  ../..//library/uio.h ../..//library/util.h ../..//library/version.h \
  ../..//platform/lcdconfig.h ../..//platform/platform.h \
- ../..//library/stepper.h constants/config.h chassis/odom/odometry.h \
- constants/robot_types.h chassis/drive/motion.h
+ ../..//library/stepper.h constants/config.h sensors/gyro/gyro_sensor.h \
+ chassis/odom/odometry.h constants/robot_types.h chassis/drive/motion.h

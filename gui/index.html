@@ -5,22 +5,47 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Fcdn.pixabay.com%2Fphoto%2F2022%2F07%2F23%2F19%2F59%2Fvenus-7340535_640.png&f=1&nofb=1&ipt=9aad3d22960fb1227d6140eb48ba2e0f2ee097fc62ace9736b7e23efa335f3ba" />
     <title>venus-gui</title>
-    <link rel="stylesheet" href="src/style.css">
+    <link rel="stylesheet" href="style.css">
   </head>
   <body>
     <div id="layout">
-      <canvas id="canvas"></canvas>
-      <div id="sidebar-panel">
-        <div id="sidebar-header">
-          <div class="dot"></div>
+
+      <!-- Left panel: connection status, control buttons, message terminal -->
+      <div id="left-panel">
+        <div id="left-header">
+          <div id="conn-dot" class="dot"></div>
           <div class="logo">Venus GUI</div>
+          <span id="conn-label" class="conn-label">Connecting…</span>
         </div>
-        <div id="sidebar">
+
+        <div id="controls">
+          <button id="btn-start" class="ctrl-btn ctrl-start">START_MISSION</button>
+          <button id="btn-stop"  class="ctrl-btn ctrl-stop" >STOP_MISSION</button>
+          <button id="btn-ping"  class="ctrl-btn ctrl-ping" >PING</button>
         </div>
+
+        <div id="terminal-header">
+          <span>Message Log</span>
+          <button id="btn-clear-log" class="clear-btn">Clear</button>
+        </div>
+        <div id="terminal-log"></div>
       </div>
+
+      <!-- Map canvas -->
+      <canvas id="canvas"></canvas>
+
     </div>
 
-    <div id="coord-overlay" id="coordinates">—</div>
+    <!-- Floating cell inspector overlay -->
+    <div id="sidebar">
+      <div id="sidebar-inner-header">
+        <div class="dot dot-red"></div>
+        <div class="logo">Selected Cell</div>
+      </div>
+      <div id="sidebar-content"></div>
+    </div>
+
+    <div id="coord-overlay">—</div>
 
     <script type="module" src="/src/main.js"></script>
   </body>
