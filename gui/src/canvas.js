@@ -279,15 +279,19 @@ function resize() {
 
 window.addEventListener('resize', resize);
 
-window.addEventListener('DOMContentLoaded', () => {
+function initCenter() {
     canvas.width  = canvas.offsetWidth  || window.innerWidth;
     canvas.height = canvas.offsetHeight || window.innerHeight;
     offsetX = canvas.width  / 2;
     offsetY = canvas.height / 2;
     draw();
-});
+}
 
-resize();
+if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', initCenter);
+} else {
+    initCenter();
+}
 
 // ---------------------------------------------------------------------------
 // Pan + zoom
