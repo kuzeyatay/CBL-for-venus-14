@@ -180,14 +180,16 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
     float previous_abs_deg = 0.0f;
     int stale_chunks = 0;
     int iteration = 0;
+    bool stall_retry_done = false;
 
-    /* At normal speed a small turn finishes in < 5 ms, giving the 2 ms
-     * gyro poller only 1-2 samples — not enough to integrate the
-     * rotation.  Clamp to a slow speed so there are at least ~14
-     * samples per degree. */
     if (target_abs_deg < GYRO_SMALL_TURN_THRESHOLD_DEG &&
         speed_cm_s > GYRO_SMALL_TURN_MAX_SPEED_CM_S) {
         speed_cm_s = GYRO_SMALL_TURN_MAX_SPEED_CM_S;
+    }
+
+    if (target_abs_deg >= GYRO_LARGE_TURN_THRESHOLD_DEG &&
+        speed_cm_s > GYRO_LARGE_TURN_MAX_SPEED_CM_S) {
+        speed_cm_s = GYRO_LARGE_TURN_MAX_SPEED_CM_S;
     }
 
     int stepper_speed = speedFromCmPerSec(speed_cm_s);
@@ -241,6 +243,21 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
         }
 
         if (stale_chunks >= GYRO_TURN_MAX_STALE_CHUNKS) {
+            float remaining = target_abs_deg - measured_abs_deg;
+
+            if (!stall_retry_done &&
+                remaining > GYRO_TURN_TOLERANCE_DEG &&
+                speed_cm_s > GYRO_SMALL_TURN_MAX_SPEED_CM_S) {
+                printf("GYRO TURN stall at %.2f/%.2f deg, retrying slowly\n",
+                       measured_abs_deg, target_abs_deg);
+                speed_cm_s = GYRO_SMALL_TURN_MAX_SPEED_CM_S;
+                stepper_speed = speedFromCmPerSec(speed_cm_s);
+                stepper_set_speed(stepper_speed, stepper_speed);
+                stale_chunks = 0;
+                stall_retry_done = true;
+                continue;
+            }
+
             printf("GYRO TURN stopped: yaw not changing after %d chunks\n",
                    stale_chunks);
             break;

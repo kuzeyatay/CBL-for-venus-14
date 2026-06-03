@@ -77,6 +77,15 @@
  */
 #define GYRO_SMALL_TURN_THRESHOLD_DEG  10.0f
 #define GYRO_SMALL_TURN_MAX_SPEED_CM_S  3.0f
+/*
+ * Large-turn speed cap:
+ * Turns >= 90 degrees put sustained load on the motor drivers.
+ * Capping to GYRO_LARGE_TURN_MAX_SPEED_CM_S reduces stall risk.
+ * If a stall is still detected mid-turn, one retry at the slow
+ * small-turn speed is attempted before giving up.
+ */
+#define GYRO_LARGE_TURN_THRESHOLD_DEG  90.0f
+#define GYRO_LARGE_TURN_MAX_SPEED_CM_S 10.0f
 
 /* 1 = scripted fake readings, 0 = real sensors. */
 #define USE_MOCK_SENSORS 0
