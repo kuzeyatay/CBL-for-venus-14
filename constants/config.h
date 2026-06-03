@@ -65,7 +65,18 @@
 #define GYRO_TURN_UPDATE_INTERVAL_MS 2
 #define GYRO_TURN_SETTLE_MS 100
 #define GYRO_TURN_MAX_ITERATIONS 120
-#define GYRO_TURN_MAX_STALE_CHUNKS 3
+#define GYRO_TURN_MAX_STALE_CHUNKS 5
+/*
+ * Small-turn speed cap:
+ * At normal navigation speed (~8 cm/s) a 1-3 degree turn takes only
+ * 3-6 ms, leaving fewer than 3 gyro samples at 2 ms polling — the
+ * integrator misses most of the rotation and the stale-chunk detector
+ * exits early.  Capping speed to GYRO_SMALL_TURN_MAX_SPEED_CM_S for
+ * turns shorter than GYRO_SMALL_TURN_THRESHOLD_DEG slows the motion
+ * to ~28 ms/degree, giving the gyro ~14 samples per degree.
+ */
+#define GYRO_SMALL_TURN_THRESHOLD_DEG  10.0f
+#define GYRO_SMALL_TURN_MAX_SPEED_CM_S  3.0f
 
 /* 1 = scripted fake readings, 0 = real sensors. */
 #define USE_MOCK_SENSORS 0

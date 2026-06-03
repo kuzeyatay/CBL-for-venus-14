@@ -41,6 +41,15 @@ void setGyroTurnFeedbackEnabled(bool enabled)
     gyro_turn_feedback_enabled = enabled;
 }
 
+void recalibrateGyroIfReady(void)
+{
+#if GYRO_TURN_ENABLED
+    if (!USE_MOCK_SENSORS && isMPU6886Initialized()) {
+        updateMPU6886GyroBias(100);
+    }
+#endif
+}
+
 static float normalizeTurnCommand(float angle_deg)
 {
     angle_deg = fmodf(angle_deg, 360.0f);
@@ -172,6 +181,15 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
     int stale_chunks = 0;
     int iteration = 0;
 
+    /* At normal speed a small turn finishes in < 5 ms, giving the 2 ms
+     * gyro poller only 1-2 samples — not enough to integrate the
+     * rotation.  Clamp to a slow speed so there are at least ~14
+     * samples per degree. */
+    if (target_abs_deg < GYRO_SMALL_TURN_THRESHOLD_DEG &&
+        speed_cm_s > GYRO_SMALL_TURN_MAX_SPEED_CM_S) {
+        speed_cm_s = GYRO_SMALL_TURN_MAX_SPEED_CM_S;
+    }
+
     int stepper_speed = speedFromCmPerSec(speed_cm_s);
     stepper_set_speed(stepper_speed, stepper_speed);
 
@@ -210,6 +228,7 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
 
         if (!waitForStepperSteps(true)) {
             printf("GYRO TURN read failure during feedback loop\n");
+            measured_abs_deg += chunk_deg;
             break;
         }
 

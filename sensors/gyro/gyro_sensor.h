@@ -74,6 +74,13 @@ bool readMPU6886Data(MPU6886Data *data);
 
 bool calibrateMPU6886Gyro(int sample_count);
 
+/*
+ * Fast in-mission bias update. Takes ~200 ms (100 samples × 2 ms).
+ * Call while the robot is stationary to correct thermal drift.
+ * Restores the old gz bias on failure.
+ */
+bool updateMPU6886GyroBias(int sample_count);
+
 void resetMPU6886Yaw(void);
 
 /*

@@ -115,6 +115,9 @@ static bool mpu_read_u8(uint8_t reg, uint8_t *value) {
 }
 
 static bool mpu_read_multi(uint8_t reg, uint8_t *data, uint16_t len) {
+    if (iic_read_register(IIC0, MPU6886_ADDR, reg, data, len) == 0) {
+        return true;
+    }
     return iic_read_register(IIC0, MPU6886_ADDR, reg, data, len) == 0;
 }
 
@@ -435,6 +438,47 @@ bool readMPU6886Data(MPU6886Data *data) {
 }
 
 /* ---------------- Gyro calibration and yaw integration ---------------- */
+
+bool updateMPU6886GyroBias(int sample_count) {
+    double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+    int valid_count = 0;
+
+    if (!mpu6886_initialized) return false;
+    if (sample_count <= 0) sample_count = 100;
+
+    float prev_z = gyro_z_bias_dps;
+
+    gyro_x_bias_dps = 0.0f;
+    gyro_y_bias_dps = 0.0f;
+    gyro_z_bias_dps = 0.0f;
+
+    for (int i = 0; i < sample_count; i++) {
+        MPU6886RawData raw;
+        if (readMPU6886Raw(&raw)) {
+            sum_x += (double)((float)raw.gx * gyro_lsb_to_dps);
+            sum_y += (double)((float)raw.gy * gyro_lsb_to_dps);
+            sum_z += (double)((float)raw.gz * gyro_lsb_to_dps);
+            valid_count++;
+        }
+        sleep_msec(2);
+    }
+
+    if (valid_count <= 0) {
+        gyro_x_bias_dps = 0.0f;
+        gyro_y_bias_dps = 0.0f;
+        gyro_z_bias_dps = prev_z;
+        return false;
+    }
+
+    gyro_x_bias_dps = (float)(sum_x / (double)valid_count);
+    gyro_y_bias_dps = (float)(sum_y / (double)valid_count);
+    gyro_z_bias_dps = (float)(sum_z / (double)valid_count);
+
+    printf("MPU6886: bias updated gz=%.5f dps (drift=%.5f dps)\n",
+           gyro_z_bias_dps, gyro_z_bias_dps - prev_z);
+
+    return true;
+}
 
 bool calibrateMPU6886Gyro(int sample_count) {
     double sum_x = 0.0;

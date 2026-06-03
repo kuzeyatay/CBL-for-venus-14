@@ -961,6 +961,7 @@ static void runScan360(void)
     bool tape_scan_enabled = isTCS3200Calibrated();
 
     resetScanEvidence();
+    recalibrateGyroIfReady();
 
 #if NAV_DEBUG_SCAN360
     printf("SCAN360 START yaw=%.2f, step=%.2f, tape_scan=%s\n",
@@ -1056,6 +1057,7 @@ static void runScan360(void)
     printf("SCAN360 COMPLETE original_yaw=%.2f, final_yaw=%.2f\n",
            original_yaw,
            completed_pose.yaw);
+    odometryInit(completed_pose.x, completed_pose.y, original_yaw);
     sendPoseUpdate();
 
 #if NAV_DEBUG_SCAN360
