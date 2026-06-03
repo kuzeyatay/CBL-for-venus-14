@@ -175,6 +175,7 @@ static const char *cellStatusToString(cell_status_t status)
         case CELL_RESERVED: return "reserved";
         case CELL_EXPLORED: return "explored";
         case CELL_UNSAFE: return "unsafe";
+        case CELL_TAPE: return "tape";
         case CELL_HILL: return "hill";
         case CELL_SAMPLE: return "sample";
         default: return "unknown";
@@ -241,6 +242,7 @@ static bool isInsideMap(int x, int y)
 static bool isTerminalCellStatus(cell_status_t status)
 {
     return status == CELL_UNSAFE ||
+           status == CELL_TAPE ||
            status == CELL_HILL ||
            status == CELL_SAMPLE;
 }
@@ -248,6 +250,7 @@ static bool isTerminalCellStatus(cell_status_t status)
 static bool isBlockedCellStatus(cell_status_t status)
 {
     return status == CELL_UNSAFE ||
+           status == CELL_TAPE ||
            status == CELL_HILL ||
            status == CELL_SAMPLE;
 }
@@ -904,8 +907,8 @@ static void markSampleAtCell(grid_cell_t cell)
 
 static void markTapeAtCell(grid_cell_t cell)
 {
-    printf("MARK UNSAFE tape cell=(%d,%d)\n", cell.x, cell.y);
-    setMapCellStatus(cell.x, cell.y, CELL_UNSAFE);
+    printf("MARK TAPE cell=(%d,%d)\n", cell.x, cell.y);
+    setMapCellStatus(cell.x, cell.y, CELL_TAPE);
 }
 
 static void markCurrentCellState(void)
@@ -955,6 +958,9 @@ static void markCurrentCellState(void)
 
 static void runScan360(void)
 {
+    static int scan_count = 0;
+    scan_count++;
+
     pose_t start_pose = getPose();
     float original_yaw = start_pose.yaw;
     float scanned_deg = 0.0f;
@@ -1011,6 +1017,8 @@ static void runScan360(void)
             } else if (clear) {
                 evidence->clear_count++;
             }
+
+            sendScanRayUpdate(pose.yaw, distance_window.display_distance_mm);
         }
 
 #if NAV_DEBUG_SCAN360
@@ -1057,6 +1065,15 @@ static void runScan360(void)
     printf("SCAN360 COMPLETE original_yaw=%.2f, final_yaw=%.2f\n",
            original_yaw,
            completed_pose.yaw);
+
+    if (scan_count % SCAN_DRIFT_CORRECTION_INTERVAL == 0) {
+        printf("SCAN360 DRIFT CORRECTION scan=%d, extra=%.2f deg\n",
+               scan_count,
+               SCAN_DRIFT_CORRECTION_DEG);
+        turn(SCAN_DRIFT_CORRECTION_DEG, DEFAULT_SPEED);
+        completed_pose = getPose();
+    }
+
     odometryInit(completed_pose.x, completed_pose.y, original_yaw);
     sendPoseUpdate();
 
@@ -1294,10 +1311,10 @@ static void handleMovementObject(grid_cell_t affected_cell,
                confirm_window.display_distance_mm,
                affected_cell.x,
                affected_cell.y);
-        printf("MOVE TARGET CENTER target reset to unknown to avoid immediate retry after ambiguous stop\n");
+        printf("MOVE TARGET CENTER target reset to scanned_clear after ambiguous stop\n");
         setMapCellStatus(affected_cell.x,
                          affected_cell.y,
-                         CELL_UNKNOWN);
+                         CELL_SCANNED_CLEAR);
         reverseToCellCenter(return_cell, return_yaw_deg);
         return;
     }
@@ -1370,11 +1387,25 @@ static void moveToTargetCenter(void)
 
     turnTowardPoint(target_x_cm, target_y_cm, DEFAULT_SPEED);
 
+    float total_moved_cm = 0.0f;
+
     while (mission_running) {
         pose_t pose = getPose();
         float delta_x = target_x_cm - pose.x;
         float delta_y = target_y_cm - pose.y;
         float distance_cm = sqrtf(delta_x * delta_x + delta_y * delta_y);
+
+        if (total_moved_cm > CELL_SIZE_CM * 2.0f &&
+            distance_cm > CELL_CENTER_REACHED_TOLERANCE_CM) {
+            printf("MOVE TARGET CENTER overshot: moved=%.2f cm, distance_remaining=%.2f cm — aborting\n",
+                   total_moved_cm,
+                   distance_cm);
+            reverseToCellCenter(return_cell, start_pose.yaw);
+            current_cell = return_cell;
+            transitionTo(NAV_STATE_CHOOSE_TARGET,
+                         "aborted — exceeded max movement without reaching target");
+            return;
+        }
 
         if (distance_cm <= CELL_CENTER_REACHED_TOLERANCE_CM) {
             distance_window_t final_window =
@@ -1396,7 +1427,7 @@ static void moveToTargetCenter(void)
                 field_event_t event;
 
                 event.type = FIELD_BLACK_TAPE;
-                event.distance_mm = final_window.display_distance_mm;
+                event.distance_mm = 0;
                 event.width_cm = 0.0f;
                 event.color = COLOR_BLACK;
                 event.sample_size_cm = 0;
@@ -1443,7 +1474,7 @@ static void moveToTargetCenter(void)
             field_event_t event;
 
             event.type = FIELD_BLACK_TAPE;
-            event.distance_mm = front_window.display_distance_mm;
+            event.distance_mm = 0;
             event.width_cm = 0.0f;
             event.color = COLOR_BLACK;
             event.sample_size_cm = 0;
@@ -1488,6 +1519,7 @@ static void moveToTargetCenter(void)
         }
 
         moveWithRamp(step_cm, DEFAULT_SPEED);
+        total_moved_cm += step_cm;
         sendPoseUpdate();
         pollESP32Messages();
     }

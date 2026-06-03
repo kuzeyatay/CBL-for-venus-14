@@ -13,6 +13,7 @@ void handleBaseStationMessage(const char *message);
 void sendPoseUpdate(void);
 void sendFieldEventUpdate(field_event_t event);
 void sendCellUpdate(int local_grid_x, int local_grid_y, cell_status_t status);
+void sendScanRayUpdate(float yaw, int distance_mm);
 void sendStatusUpdate(const char *state, const char *error_code);
 void sendErrorMessage(const char *error_code);
 

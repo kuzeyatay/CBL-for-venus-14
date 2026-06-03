@@ -342,6 +342,20 @@ void sendCellUpdate(int local_grid_x, int local_grid_y, cell_status_t status)
     sendPayloadToESP32(payload);
 }
 
+void sendScanRayUpdate(float yaw, int distance_mm)
+{
+    char payload[UART_PAYLOAD_MAX_SIZE];
+
+    snprintf(payload,
+             sizeof(payload),
+             "SCAN_RAY,%s,%.2f,%d",
+             ROBOT_ID,
+             yaw,
+             distance_mm);
+
+    sendPayloadToESP32(payload);
+}
+
 void sendStatusUpdate(const char *state, const char *error_code)
 {
     char payload[UART_PAYLOAD_MAX_SIZE];

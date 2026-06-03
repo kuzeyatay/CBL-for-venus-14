@@ -32,6 +32,7 @@ typedef enum {
     CELL_RESERVED,
     CELL_EXPLORED,
     CELL_UNSAFE,
+    CELL_TAPE,
     CELL_HILL,
     CELL_SAMPLE
 } cell_status_t;
