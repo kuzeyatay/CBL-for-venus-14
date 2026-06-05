@@ -76,6 +76,7 @@ typedef struct {
     int object_count;
     int tape_count;
     int min_distance_mm;
+    float min_distance_yaw;
 } scan_evidence_t;
 
 typedef struct {
@@ -113,7 +114,6 @@ static bool isValidBacktrackCell(grid_cell_t cell);
 
 static float cellCenterXCm(grid_cell_t cell);
 static float cellCenterYCm(grid_cell_t cell);
-static float directionToYaw(nav_direction_t direction);
 static float shortestAngleDelta(float target_yaw_deg, float current_yaw_deg);
 
 static distance_window_t readDistanceWindow(int reading_count);
@@ -141,6 +141,9 @@ static void markCurrentCellState(void);
 static void runScan360(void);
 static void updateMapFromScan(void);
 static void chooseNextTarget(void);
+static void investigateObjectAt(grid_cell_t candidate_cell,
+                                nav_direction_t direction,
+                                float candidate_yaw);
 static void investigateObjectCandidate(void);
 static void handleMovementObject(grid_cell_t affected_cell,
                                  grid_cell_t return_cell,
@@ -162,6 +165,7 @@ static grid_cell_t current_cell = {MAP_CENTER, MAP_CENTER};
 static grid_cell_t target_cell = {MAP_CENTER, MAP_CENTER};
 static grid_cell_t object_candidate_cells[NAV_DIR_COUNT];
 static int object_candidate_dirs[NAV_DIR_COUNT];
+static float object_candidate_yaws[NAV_DIR_COUNT];
 static int object_candidate_count = 0;
 static int object_candidate_index = 0;
 
@@ -498,17 +502,6 @@ static float cellCenterYCm(grid_cell_t cell)
     return (float)(cell.y - MAP_CENTER) * CELL_SIZE_CM;
 }
 
-static float directionToYaw(nav_direction_t direction)
-{
-    switch (direction) {
-        case NAV_DIR_POS_X: return 0.0f;
-        case NAV_DIR_POS_Y: return 90.0f;
-        case NAV_DIR_NEG_X: return 180.0f;
-        case NAV_DIR_NEG_Y: return 270.0f;
-        default: return 0.0f;
-    }
-}
-
 static float shortestAngleDelta(float target_yaw_deg, float current_yaw_deg)
 {
     float delta = normalizeAngle(target_yaw_deg - current_yaw_deg);
@@ -726,6 +719,7 @@ static void resetScanEvidence(void)
         scan_evidence[dir].object_count = 0;
         scan_evidence[dir].tape_count = 0;
         scan_evidence[dir].min_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
+        scan_evidence[dir].min_distance_yaw = 0.0f;
     }
 }
 
@@ -1003,11 +997,7 @@ static void runScan360(void)
 
     pose_t start_pose = getPose();
     float original_yaw = start_pose.yaw;
-    /* First scan covers only 180° — the back half is the other robot's side.
-     * No pre-turn: sweeping forward (0°→180°) covers POS_X and POS_Y.
-     * NEG_Y is picked up by the next full 360° scan.  A pre-turn of ±90°
-     * added an extra large gyro turn that accumulated 10-15° of scale error. */
-    float total_scan_deg = (scan_count == 1) ? 180.0f : 360.0f;
+    float total_scan_deg = 360.0f;
     float scanned_deg = 0.0f;
     float sweep_start_yaw = original_yaw;
     bool tape_scan_enabled = isTCS3200Calibrated();
@@ -1094,24 +1084,32 @@ static void runScan360(void)
         black_tape = shouldTreatBlackReadingAsTape(raw_black, close_object);
         clear = !close_object && !black_tape;
 
-        /* Only accumulate evidence for active directions */
+        /* Active directions: classify objects on the spot, otherwise accumulate
+         * tape/clear evidence for the post-scan map update. */
         if (!is_heading_check_ray && dir_active[direction]) {
-            scan_evidence_t *evidence = &scan_evidence[direction];
+            sendScanRayUpdate(pose.yaw, window.display_distance_mm);
 
             if (close_object) {
-                evidence->object_count++;
+                grid_cell_t obj_cell = adjacentCell(current_cell, direction);
 
-                if (evidence->min_distance_mm == VL53L0X_INVALID_DISTANCE_MM ||
-                    window.best_close_distance_mm < evidence->min_distance_mm) {
-                    evidence->min_distance_mm = window.best_close_distance_mm;
+                if (isInsideMap(obj_cell.x, obj_cell.y) &&
+                    missionFrameLocalGridIndexIsInAssignedHalf(obj_cell.x, obj_cell.y) &&
+                    map_grid[obj_cell.x][obj_cell.y] != CELL_EXPLORED &&
+                    !isTerminalCellStatus(map_grid[obj_cell.x][obj_cell.y])) {
+                    printf("SCAN360 object seen dir=%s cell=(%d,%d) yaw=%.2f — investigating now\n",
+                           directionName(direction), obj_cell.x, obj_cell.y, pose.yaw);
+                    investigateObjectAt(obj_cell, direction, pose.yaw);
                 }
-            } else if (black_tape) {
-                evidence->tape_count++;
-            } else if (clear) {
-                evidence->clear_count++;
-            }
 
-            sendScanRayUpdate(pose.yaw, window.display_distance_mm);
+                /* This direction is classified — skip the rest of its arc and
+                 * resume the sweep from where we left off. */
+                dir_active[direction] = false;
+                continue;
+            } else if (black_tape) {
+                scan_evidence[direction].tape_count++;
+            } else if (clear) {
+                scan_evidence[direction].clear_count++;
+            }
         }
 
 #if NAV_DEBUG_SCAN360
@@ -1151,22 +1149,9 @@ static void runScan360(void)
         }
     }
 
-    /* Explicit correction back to original heading after the sweep.
-     * The sweep loop already calls turnToYaw(original_yaw) at the last step,
-     * but a second call here corrects any residual gyro drift so the robot is
-     * visibly at original_yaw before investigation or movement begins. */
-    turnToYaw(original_yaw, DEFAULT_SPEED);
-
     pose_t completed_pose = getPose();
     printf("SCAN COMPLETE cell=(%d,%d) original_yaw=%.2f final_yaw=%.2f\n",
            current_cell.x, current_cell.y, original_yaw, completed_pose.yaw);
-
-    if (scan_count % SCAN_DRIFT_CORRECTION_INTERVAL == 0) {
-        printf("SCAN DRIFT CORRECTION scan=%d extra=%.2f deg\n",
-               scan_count, SCAN_DRIFT_CORRECTION_DEG);
-        turn(SCAN_DRIFT_CORRECTION_DEG, DEFAULT_SPEED);
-        completed_pose = getPose();
-    }
 
     odometryInit(completed_pose.x, completed_pose.y, original_yaw);
     sendPoseUpdate();
@@ -1235,6 +1220,7 @@ static void updateMapFromScan(void)
                 object_candidate_count < NAV_DIR_COUNT) {
                 object_candidate_cells[object_candidate_count] = cell;
                 object_candidate_dirs[object_candidate_count] = dir;
+                object_candidate_yaws[object_candidate_count] = evidence.min_distance_yaw;
                 object_candidate_count++;
             }
         } else if (evidence.clear_count >= SCAN_CLEAR_MIN_READINGS) {
@@ -1289,120 +1275,115 @@ static void chooseNextTarget(void)
     transitionTo(NAV_STATE_BACKTRACK, "no adjacent scanned_clear target");
 }
 
+/*
+ * Investigate a single object: turn to the heading where it was seen, confirm
+ * it is really there, approach to classification distance, classify it, mark
+ * the cell, and return to the pose we started from.  Called inline during the
+ * 360 scan (the moment an object is seen) and from the post-scan candidate
+ * queue.  Always leaves the robot back at its starting pose.
+ */
+static void investigateObjectAt(grid_cell_t candidate_cell,
+                                nav_direction_t direction,
+                                float candidate_yaw)
+{
+    pose_t saved_pose = getPose();
+
+    /* Aim at the exact heading where the object was seen, not the cardinal —
+     * a sample offset within the cell appears a few degrees off-axis. */
+    turnToYaw(candidate_yaw, DEFAULT_SPEED);
+
+    distance_window_t confirm_window =
+        readDistanceWindow(INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION);
+
+    if (!distanceWindowHasCloseObject(confirm_window,
+                                      INVESTIGATE_OBJECT_MIN_CLOSE_READINGS)) {
+        printf("Object confirmation failed: close_reads=%d/%d, invalid_reads=%d, distance=%d\n",
+               confirm_window.close_reading_count,
+               INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
+               confirm_window.invalid_reading_count,
+               confirm_window.display_distance_mm);
+        sendNavLog("WARN", "Object at %s rejected: only %d/%d close readings (dist=%dmm)",
+                   directionName(direction),
+                   confirm_window.close_reading_count,
+                   INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
+                   confirm_window.display_distance_mm);
+        setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+        returnToPoseApprox(saved_pose);
+        return;
+    }
+
+    moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+
+    sensor_data_t sensor_data = readReliableSensorData();
+    field_event_t event = interpretSensorData(sensor_data);
+
+    if (event.type == FIELD_SENSOR_FAULT) {
+        printf("Sensor fault on first attempt, retrying investigation\n");
+        sendNavLog("WARN", "Sensor fault at %s — retrying", directionName(direction));
+        sensor_data = readReliableSensorData();
+        event = interpretSensorData(sensor_data);
+    }
+
+    sendNavLog("INFO", "Object at %s: %s (width=%.1fcm, dist=%dmm)",
+               directionName(direction),
+               eventToString(event.type),
+               event.width_cm,
+               event.distance_mm);
+
+    switch (event.type) {
+        case FIELD_ROCK_SAMPLE: {
+            finalizeRockSampleAtCloseRange(&event);
+            /* Override distance with the geometric distance to the candidate
+             * cell center so sendFieldEventUpdate projects the EVENT to the
+             * same cell that markSampleAtCell marks (fixes icon/cell mismatch). */
+            pose_t post_approach = getPose();
+            float dx = cellCenterXCm(candidate_cell) - post_approach.x;
+            float dy = cellCenterYCm(candidate_cell) - post_approach.y;
+            event.distance_mm = (int)(sqrtf(dx * dx + dy * dy) * 10.0f);
+            reportFieldEvent(event);
+            markSampleAtCell(candidate_cell);
+            break;
+        }
+
+        case FIELD_HILL:
+            if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
+                event.width_cm = HILL_PHYSICAL_SIZE_CM;
+            }
+            reportFieldEvent(event);
+            markHillBlockAroundCell(candidate_cell);
+            break;
+
+        case FIELD_BLACK_TAPE:
+            reportFieldEvent(event);
+            markTapeAtCell(candidate_cell);
+            break;
+
+        case FIELD_SENSOR_FAULT:
+            printf("Object confirmation failed: sensor fault\n");
+            reportFieldEvent(event);
+            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+            break;
+
+        case FIELD_CLEAR:
+        default:
+            printf("Object confirmation failed: event=%s\n", eventToString(event.type));
+            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+            break;
+    }
+
+    returnToPoseApprox(saved_pose);
+}
+
 static void investigateObjectCandidate(void)
 {
     while (object_candidate_index < object_candidate_count) {
         grid_cell_t candidate_cell = object_candidate_cells[object_candidate_index];
         nav_direction_t direction   = (nav_direction_t)object_candidate_dirs[object_candidate_index];
+        float candidate_yaw         = object_candidate_yaws[object_candidate_index];
 
-        if (!isInsideMap(candidate_cell.x, candidate_cell.y) ||
-            isTerminalCellStatus(map_grid[candidate_cell.x][candidate_cell.y])) {
-            printf("INVESTIGATE OBJECT %d/%d skipped dir=%s cell=(%d,%d)\n",
-                   object_candidate_index + 1,
-                   object_candidate_count,
-                   directionName(direction),
-                   candidate_cell.x,
-                   candidate_cell.y);
-            object_candidate_index++;
-            continue;
-        }
-
-        printf("INVESTIGATE OBJECT %d/%d dir=%s cell=(%d,%d)\n",
-               object_candidate_index + 1,
-               object_candidate_count,
-               directionName(direction),
-               candidate_cell.x,
-               candidate_cell.y);
-
-        pose_t saved_pose = getPose();
-
-        turnToYaw(directionToYaw(direction), DEFAULT_SPEED);
-
-        distance_window_t confirm_window =
-            readDistanceWindow(INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION);
-
-        if (!distanceWindowHasCloseObject(confirm_window,
-                                          INVESTIGATE_OBJECT_MIN_CLOSE_READINGS)) {
-            printf("Object confirmation failed: close_reads=%d/%d, invalid_reads=%d, distance=%d\n",
-                   confirm_window.close_reading_count,
-                   INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
-                   confirm_window.invalid_reading_count,
-                   confirm_window.display_distance_mm);
-            sendNavLog("WARN", "Object at %s rejected: only %d/%d close readings (dist=%dmm)",
-                       directionName(direction),
-                       confirm_window.close_reading_count,
-                       INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
-                       confirm_window.display_distance_mm);
-            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
-            returnToPoseApprox(saved_pose);
-            object_candidate_index++;
-            continue;
-        }
-
-        moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
-
-        sensor_data_t sensor_data = readReliableSensorData();
-        field_event_t event = interpretSensorData(sensor_data);
-
-        if (event.type == FIELD_SENSOR_FAULT) {
-            printf("Sensor fault on first attempt, retrying investigation\n");
-            sendNavLog("WARN", "Sensor fault at %s — retrying", directionName(direction));
-            sensor_data = readReliableSensorData();
-            event = interpretSensorData(sensor_data);
-        }
-
-        sendNavLog("INFO", "Object at %s: %s (width=%.1fcm, dist=%dmm)",
-                   directionName(direction),
-                   eventToString(event.type),
-                   event.width_cm,
-                   event.distance_mm);
-
-        switch (event.type) {
-            case FIELD_ROCK_SAMPLE: {
-                finalizeRockSampleAtCloseRange(&event);
-                /* Override distance with the geometric distance to the candidate
-                 * cell center so sendFieldEventUpdate projects the EVENT to the
-                 * same cell that markSampleAtCell marks (fixes icon/cell mismatch). */
-                pose_t post_approach = getPose();
-                float dx = cellCenterXCm(candidate_cell) - post_approach.x;
-                float dy = cellCenterYCm(candidate_cell) - post_approach.y;
-                event.distance_mm = (int)(sqrtf(dx * dx + dy * dy) * 10.0f);
-                reportFieldEvent(event);
-                markSampleAtCell(candidate_cell);
-                returnToPoseApprox(saved_pose);
-                break;
-            }
-
-            case FIELD_HILL:
-                if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
-                    event.width_cm = HILL_PHYSICAL_SIZE_CM;
-                }
-
-                reportFieldEvent(event);
-                markHillBlockAroundCell(candidate_cell);
-                returnToPoseApprox(saved_pose);
-                break;
-
-            case FIELD_BLACK_TAPE:
-                reportFieldEvent(event);
-                markTapeAtCell(candidate_cell);
-                returnToPoseApprox(saved_pose);
-                break;
-
-            case FIELD_SENSOR_FAULT:
-                printf("Object confirmation failed: sensor fault\n");
-                reportFieldEvent(event);
-                setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
-                returnToPoseApprox(saved_pose);
-                break;
-
-            case FIELD_CLEAR:
-            default:
-                printf("Object confirmation failed: event=%s\n",
-                       eventToString(event.type));
-                setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
-                returnToPoseApprox(saved_pose);
-                break;
+        if (isInsideMap(candidate_cell.x, candidate_cell.y) &&
+            !isTerminalCellStatus(map_grid[candidate_cell.x][candidate_cell.y])) {
+            investigateObjectAt(candidate_cell, direction, candidate_yaw);
         }
 
         object_candidate_index++;
@@ -1543,9 +1524,17 @@ static void moveToTargetCenter(void)
 
             if (final_black_tape) {
                 field_event_t event;
+                /* Project the event to the target cell center (where the tape
+                 * is) so the GUI icon lands on the same cell markTapeAtCell
+                 * colors, instead of one cell further along the heading. */
+                pose_t tape_pose = getPose();
+                float tape_dx = cellCenterXCm(target_cell) - tape_pose.x;
+                float tape_dy = cellCenterYCm(target_cell) - tape_pose.y;
+                int tape_dist_mm =
+                    (int)(sqrtf(tape_dx * tape_dx + tape_dy * tape_dy) * 10.0f);
 
                 event.type = FIELD_BLACK_TAPE;
-                event.distance_mm = 0;
+                event.distance_mm = tape_dist_mm > 0 ? tape_dist_mm : 1;
                 event.width_cm = 0.0f;
                 event.color = COLOR_BLACK;
                 event.sample_size_cm = 0;
@@ -1593,9 +1582,16 @@ static void moveToTargetCenter(void)
 
         if (black_tape) {
             field_event_t event;
+            /* Project the event to the target cell center (where the tape is)
+             * so the GUI icon lands on the same cell markTapeAtCell colors. */
+            pose_t tape_pose = getPose();
+            float tape_dx = cellCenterXCm(target_cell) - tape_pose.x;
+            float tape_dy = cellCenterYCm(target_cell) - tape_pose.y;
+            int tape_dist_mm =
+                (int)(sqrtf(tape_dx * tape_dx + tape_dy * tape_dy) * 10.0f);
 
             event.type = FIELD_BLACK_TAPE;
-            event.distance_mm = 0;
+            event.distance_mm = tape_dist_mm > 0 ? tape_dist_mm : 1;
             event.width_cm = 0.0f;
             event.color = COLOR_BLACK;
             event.sample_size_cm = 0;
@@ -1832,6 +1828,28 @@ void runNavigation(void)
     nav_log_start_msec = navNowMsec();
     state_entry_msec   = nav_log_start_msec;
     nav_log_timestamps_enabled = true;
+
+    /*
+     * Mission start delay: stay still for a few seconds so the operator can
+     * step clear, then recalibrate the gyro bias while the robot is guaranteed
+     * stationary before any movement begins.  STOP_MISSION still cancels here.
+     */
+    sendNavLog("INFO", "Mission starts in %ds — hold still, calibrating gyro",
+               MISSION_START_DELAY_SEC);
+
+    double start_delay_until = navNowMsec() + (double)MISSION_START_DELAY_SEC * 1000.0;
+
+    while (mission_running && navNowMsec() < start_delay_until) {
+        pollESP32Messages();
+    }
+
+    if (!mission_running) {
+        printf("Mission cancelled during start delay.\n");
+        return;
+    }
+
+    recalibrateGyroIfReady();
+    sendNavLog("INFO", "Gyro calibrated — mission underway");
 
     while (mission_running) {
         pollESP32Messages();

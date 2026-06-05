@@ -114,18 +114,20 @@
 #define MAX_NAVIGATION_STEPS 80
 #define CELL_CENTER_REACHED_TOLERANCE_CM 2.0f
 
+/* Seconds to wait after a mission starts before the robot moves.
+ * The robot stays still during this window and recalibrates the gyro bias. */
+#define MISSION_START_DELAY_SEC 5
+
 /*
  * Course manual rule: do not assume the robot's initial location or heading
  * inside the black-tape boundary.  The map is intentionally larger than a
  * 4x6 A4 test field; navigation should discover boundaries from tape.
  */
 #define SCAN_360_STEP_DEG 15.0f
-#define SCAN_DRIFT_CORRECTION_INTERVAL 3
-#define SCAN_DRIFT_CORRECTION_DEG 5.0f
 #define SCAN_DISTANCE_READINGS_PER_ANGLE 4
 #define SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS 2
 #define SCAN_CLEAR_MIN_READINGS 1
-#define SCAN_OBJECT_MIN_READINGS 2
+#define SCAN_OBJECT_MIN_READINGS 1
 #define SCAN_TAPE_MIN_READINGS 1
 
 #define MOVE_DISTANCE_READINGS_PER_CHECK 4
@@ -143,7 +145,7 @@
 
 /* Sensor/navigation thresholds */
 #define FRONT_OBJECT_MIN_DISTANCE_MM 50
-#define FRONT_OBJECT_MAX_DISTANCE_MM 250
+#define FRONT_OBJECT_MAX_DISTANCE_MM 200
 #define FRONT_OBJECT_THRESHOLD_MM FRONT_OBJECT_MAX_DISTANCE_MM
 #define SENSOR_RETRY_COUNT 3
 
@@ -172,7 +174,12 @@
 #define UART_PAYLOAD_MAX_SIZE 256
 
 /* Sample approach and post-move scan constants */
-#define SAMPLE_COLOR_DISTANCE_MM 65
+#define SAMPLE_COLOR_DISTANCE_MM 68
+/* Width-classification distance: must be far enough that a 30 cm hill's edge
+ * (atan(15/12)=51 deg at 120 mm) falls inside WIDTH_SCAN_MAX_DEG, otherwise the
+ * geometry collapses at close range and hills measure a tiny width and get
+ * misclassified as rock samples. Color reading happens later at the closer
+ * SAMPLE_COLOR_DISTANCE_MM once a rock is confirmed. */
 #define INVESTIGATE_APPROACH_DISTANCE_MM 120
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 #define SAMPLE_APPROACH_MAX_CM 20.0f
