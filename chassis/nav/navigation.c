@@ -1003,17 +1003,13 @@ static void runScan360(void)
 
     pose_t start_pose = getPose();
     float original_yaw = start_pose.yaw;
-    /* First scan covers only 180° — the back half is the other robot's side. */
+    /* First scan covers only 180° — the back half is the other robot's side.
+     * No pre-turn: sweeping forward (0°→180°) covers POS_X and POS_Y.
+     * NEG_Y is picked up by the next full 360° scan.  A pre-turn of ±90°
+     * added an extra large gyro turn that accumulated 10-15° of scale error. */
     float total_scan_deg = (scan_count == 1) ? 180.0f : 360.0f;
     float scanned_deg = 0.0f;
-    /* For the first scan, pre-turn 90° right so the sweep covers ±90° around
-     * the original heading (right → forward → left) rather than 180° to one
-     * side only. The final turnToYaw(original_yaw) already returns to center. */
     float sweep_start_yaw = original_yaw;
-    if (scan_count == 1) {
-        turn(-90.0f, DEFAULT_SPEED);
-        sweep_start_yaw = normalizeAngle(original_yaw - 90.0f);
-    }
     bool tape_scan_enabled = isTCS3200Calibrated();
 
     /* Determine which direction arcs actually need scanning.
@@ -1154,6 +1150,12 @@ static void runScan360(void)
             turn(step_deg, DEFAULT_SPEED);
         }
     }
+
+    /* Explicit correction back to original heading after the sweep.
+     * The sweep loop already calls turnToYaw(original_yaw) at the last step,
+     * but a second call here corrects any residual gyro drift so the robot is
+     * visibly at original_yaw before investigation or movement begins. */
+    turnToYaw(original_yaw, DEFAULT_SPEED);
 
     pose_t completed_pose = getPose();
     printf("SCAN COMPLETE cell=(%d,%d) original_yaw=%.2f final_yaw=%.2f\n",
