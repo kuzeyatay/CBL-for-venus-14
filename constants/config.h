@@ -119,9 +119,10 @@
  * inside the black-tape boundary.  The map is intentionally larger than a
  * 4x6 A4 test field; navigation should discover boundaries from tape.
  */
+#define SCAN_360_STEP_DEG 15.0f
 #define SCAN_DRIFT_CORRECTION_INTERVAL 3
 #define SCAN_DRIFT_CORRECTION_DEG 5.0f
-#define SCAN_DISTANCE_READINGS_PER_ANGLE 2
+#define SCAN_DISTANCE_READINGS_PER_ANGLE 4
 #define SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS 2
 #define SCAN_CLEAR_MIN_READINGS 1
 #define SCAN_OBJECT_MIN_READINGS 2
@@ -142,7 +143,7 @@
 
 /* Sensor/navigation thresholds */
 #define FRONT_OBJECT_MIN_DISTANCE_MM 50
-#define FRONT_OBJECT_MAX_DISTANCE_MM 200
+#define FRONT_OBJECT_MAX_DISTANCE_MM 250
 #define FRONT_OBJECT_THRESHOLD_MM FRONT_OBJECT_MAX_DISTANCE_MM
 #define SENSOR_RETRY_COUNT 3
 
@@ -171,7 +172,7 @@
 #define UART_PAYLOAD_MAX_SIZE 256
 
 /* Sample approach and post-move scan constants */
-#define SAMPLE_COLOR_DISTANCE_MM 55
+#define SAMPLE_COLOR_DISTANCE_MM 65
 #define INVESTIGATE_APPROACH_DISTANCE_MM 80
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 #define SAMPLE_APPROACH_MAX_CM 20.0f

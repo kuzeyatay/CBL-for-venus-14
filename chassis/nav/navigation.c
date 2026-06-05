@@ -995,50 +995,94 @@ static void markCurrentCellState(void)
 
 static void runScan360(void)
 {
+    /* Arc end boundaries (absolute yaw) for each cardinal direction */
+    static const float arc_end_abs[NAV_DIR_COUNT] = {45.0f, 135.0f, 225.0f, 315.0f};
+
     static int scan_count = 0;
     scan_count++;
 
     pose_t start_pose = getPose();
     float original_yaw = start_pose.yaw;
+    /* First scan covers only 180° — the back half is the other robot's side. */
+    float total_scan_deg = (scan_count == 1) ? 180.0f : 360.0f;
+    float scanned_deg = 0.0f;
+    /* For the first scan, pre-turn 90° right so the sweep covers ±90° around
+     * the original heading (right → forward → left) rather than 180° to one
+     * side only. The final turnToYaw(original_yaw) already returns to center. */
+    float sweep_start_yaw = original_yaw;
+    if (scan_count == 1) {
+        turn(-90.0f, DEFAULT_SPEED);
+        sweep_start_yaw = normalizeAngle(original_yaw - 90.0f);
+    }
     bool tape_scan_enabled = isTCS3200Calibrated();
-    int directions_scanned = 0;
+
+    /* Determine which direction arcs actually need scanning.
+     * EXPLORED and terminal cells are definitively known — skip their arcs.
+     * SCANNED_CLEAR is kept active because edge objects near its boundary
+     * may be visible from the current position. */
+    bool dir_active[NAV_DIR_COUNT];
+    int dirs_needed = 0;
+
+    for (int d = 0; d < NAV_DIR_COUNT; d++) {
+        grid_cell_t adj = adjacentCell(current_cell, (nav_direction_t)d);
+        dir_active[d] = false;
+
+        if (!isInsideMap(adj.x, adj.y) ||
+            !missionFrameLocalGridIndexIsInAssignedHalf(adj.x, adj.y)) {
+            continue;
+        }
+
+        cell_status_t st = map_grid[adj.x][adj.y];
+
+        if (st != CELL_EXPLORED && !isTerminalCellStatus(st)) {
+            dir_active[d] = true;
+            dirs_needed++;
+        }
+    }
 
     resetScanEvidence();
     recalibrateGyroIfReady();
 
-    printf("SCAN START cell=(%d,%d) yaw=%.2f scan=%d tape=%s\n",
-           current_cell.x, current_cell.y, original_yaw, scan_count,
+    printf("SCAN START cell=(%d,%d) yaw=%.2f scan=%d dirs=%d/%d tape=%s\n",
+           current_cell.x, current_cell.y, original_yaw,
+           scan_count, dirs_needed, NAV_DIR_COUNT,
            tape_scan_enabled ? "yes" : "no");
 
-    for (int dir = 0; dir < NAV_DIR_COUNT; dir++) {
-        nav_direction_t direction = (nav_direction_t)dir;
-        grid_cell_t adj = adjacentCell(current_cell, direction);
-        float target_yaw = directionToYaw(direction);
+    while (scanned_deg <= total_scan_deg + 0.01f) {
+        pose_t pose = getPose();
+        bool is_heading_check_ray = scanned_deg >= total_scan_deg - 0.01f;
+        nav_direction_t direction = directionFromYaw(pose.yaw);
 
-        /*
-         * Skip directions that are definitively known: explored cells the robot
-         * has physically been in, and terminal cells already classified.
-         * SCANNED_CLEAR is intentionally NOT skipped — edge objects near the
-         * boundary of a clear cell are still visible from the current position.
-         */
-        if (!isInsideMap(adj.x, adj.y) ||
-            !missionFrameLocalGridIndexIsInAssignedHalf(adj.x, adj.y)) {
-            printf("SCAN SKIP dir=%s (outside map/half)\n", directionName(direction));
-            continue;
+        /* If this direction's arc is not needed, physically skip ahead to the
+         * next arc boundary rather than sweeping through empty space. */
+        if (!is_heading_check_ray && !dir_active[direction]) {
+            float abs_yaw = normalizeAngle(sweep_start_yaw + scanned_deg);
+            float skip_deg = arc_end_abs[direction] - abs_yaw;
+
+            if (skip_deg < 0.0f) {
+                skip_deg += 360.0f;
+            }
+
+            if (skip_deg >= SCAN_360_STEP_DEG) {
+                printf("SCAN SKIP dir=%s (%.1f deg)\n",
+                       directionName(direction), skip_deg);
+
+                float new_scanned = scanned_deg + skip_deg;
+
+                if (new_scanned >= total_scan_deg - 0.01f) {
+                    scanned_deg = total_scan_deg;
+                    turnToYaw(original_yaw, DEFAULT_SPEED);
+                } else {
+                    turn(skip_deg, DEFAULT_SPEED);
+                    scanned_deg = new_scanned;
+                }
+                continue;
+            }
+            /* Skip amount smaller than one step — fall through without
+             * accumulating evidence, then take the normal step below. */
         }
 
-        cell_status_t adj_status = map_grid[adj.x][adj.y];
-
-        if (adj_status == CELL_EXPLORED || isTerminalCellStatus(adj_status)) {
-            printf("SCAN SKIP dir=%s cell=(%d,%d) status=%s\n",
-                   directionName(direction), adj.x, adj.y,
-                   cellStatusToString(adj_status));
-            continue;
-        }
-
-        turnToYaw(target_yaw, DEFAULT_SPEED);
-        directions_scanned++;
-
+        /* Take sensor readings */
         distance_window_t window =
             readDistanceWindow(SCAN_DISTANCE_READINGS_PER_ANGLE);
         bool close_object =
@@ -1054,26 +1098,31 @@ static void runScan360(void)
         black_tape = shouldTreatBlackReadingAsTape(raw_black, close_object);
         clear = !close_object && !black_tape;
 
-        scan_evidence_t *evidence = &scan_evidence[direction];
+        /* Only accumulate evidence for active directions */
+        if (!is_heading_check_ray && dir_active[direction]) {
+            scan_evidence_t *evidence = &scan_evidence[direction];
 
-        if (close_object) {
-            evidence->object_count++;
+            if (close_object) {
+                evidence->object_count++;
 
-            if (evidence->min_distance_mm == VL53L0X_INVALID_DISTANCE_MM ||
-                window.best_close_distance_mm < evidence->min_distance_mm) {
-                evidence->min_distance_mm = window.best_close_distance_mm;
+                if (evidence->min_distance_mm == VL53L0X_INVALID_DISTANCE_MM ||
+                    window.best_close_distance_mm < evidence->min_distance_mm) {
+                    evidence->min_distance_mm = window.best_close_distance_mm;
+                }
+            } else if (black_tape) {
+                evidence->tape_count++;
+            } else if (clear) {
+                evidence->clear_count++;
             }
-        } else if (black_tape) {
-            evidence->tape_count++;
-        } else if (clear) {
-            evidence->clear_count++;
+
+            sendScanRayUpdate(pose.yaw, window.display_distance_mm);
         }
 
-        sendScanRayUpdate(target_yaw, window.display_distance_mm);
-
 #if NAV_DEBUG_SCAN360
-        printf("SCAN DIR dir=%s dist=%d close=%d/%d invalid=%d black=%s tape=%s object=%s clear=%s\n",
+        printf("SCAN360 RAY yaw=%.2f dir=%s active=%s dist=%d close=%d/%d invalid=%d black=%s tape=%s object=%s clear=%s counted=%s\n",
+               pose.yaw,
                directionName(direction),
+               dir_active[direction] ? "yes" : "no",
                window.display_distance_mm,
                window.close_reading_count,
                SCAN_DISTANCE_READINGS_PER_ANGLE,
@@ -1081,17 +1130,34 @@ static void runScan360(void)
                raw_black    ? "yes" : "no",
                black_tape   ? "yes" : "no",
                close_object ? "yes" : "no",
-               clear        ? "yes" : "no");
+               clear        ? "yes" : "no",
+               is_heading_check_ray ? "no" : "yes");
 #endif
+
+        if (is_heading_check_ray) {
+            break;
+        }
+
+        float remaining_deg = total_scan_deg - scanned_deg;
+        float step_deg = SCAN_360_STEP_DEG;
+
+        if (step_deg > remaining_deg) {
+            step_deg = remaining_deg;
+        }
+
+        scanned_deg += step_deg;
+
+        if (scanned_deg >= total_scan_deg - 0.01f) {
+            scanned_deg = total_scan_deg;
+            turnToYaw(original_yaw, DEFAULT_SPEED);
+        } else {
+            turn(step_deg, DEFAULT_SPEED);
+        }
     }
 
-    turnToYaw(original_yaw, DEFAULT_SPEED);
-
     pose_t completed_pose = getPose();
-    printf("SCAN COMPLETE cell=(%d,%d) dirs=%d/%d original_yaw=%.2f final_yaw=%.2f\n",
-           current_cell.x, current_cell.y,
-           directions_scanned, NAV_DIR_COUNT,
-           original_yaw, completed_pose.yaw);
+    printf("SCAN COMPLETE cell=(%d,%d) original_yaw=%.2f final_yaw=%.2f\n",
+           current_cell.x, current_cell.y, original_yaw, completed_pose.yaw);
 
     if (scan_count % SCAN_DRIFT_CORRECTION_INTERVAL == 0) {
         printf("SCAN DRIFT CORRECTION scan=%d extra=%.2f deg\n",
@@ -1112,7 +1178,7 @@ static void runScan360(void)
     }
 #endif
 
-    transitionTo(NAV_STATE_UPDATE_MAP, "targeted scan complete");
+    transitionTo(NAV_STATE_UPDATE_MAP, "360 scan complete");
 }
 
 static void updateMapFromScan(void)
@@ -1290,12 +1356,20 @@ static void investigateObjectCandidate(void)
                    event.distance_mm);
 
         switch (event.type) {
-            case FIELD_ROCK_SAMPLE:
+            case FIELD_ROCK_SAMPLE: {
                 finalizeRockSampleAtCloseRange(&event);
+                /* Override distance with the geometric distance to the candidate
+                 * cell center so sendFieldEventUpdate projects the EVENT to the
+                 * same cell that markSampleAtCell marks (fixes icon/cell mismatch). */
+                pose_t post_approach = getPose();
+                float dx = cellCenterXCm(candidate_cell) - post_approach.x;
+                float dy = cellCenterYCm(candidate_cell) - post_approach.y;
+                event.distance_mm = (int)(sqrtf(dx * dx + dy * dy) * 10.0f);
                 reportFieldEvent(event);
                 markSampleAtCell(candidate_cell);
                 returnToPoseApprox(saved_pose);
                 break;
+            }
 
             case FIELD_HILL:
                 if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
