@@ -108,6 +108,17 @@ function parseCSVMessage(raw) {
             break;
         }
 
+        case 'LOG': {
+            const robotId = parts[1] ?? '?';
+            const level   = (parts[2] ?? 'INFO').trim().toUpperCase();
+            const message = parts.slice(3).join(',').trim();
+            const cls = level === 'ERROR' ? 'term-log-error'
+                      : level === 'WARN'  ? 'term-log-warn'
+                      :                     'term-log-info';
+            terminalAppend(`[${robotId}] ${level}: ${message}`, cls);
+            break;
+        }
+
         case 'MISSION_STARTED':
         case 'PONG':
             console.log(`[client] ${type} from robot ${parts[1] ?? '?'}`);
@@ -144,7 +155,7 @@ function connect() {
 
     socket.onmessage = (event) => {
         const raw = event.data;
-        terminalRecv(raw);
+        if (!raw.startsWith('LOG,')) terminalRecv(raw);
         parseCSVMessage(raw);
     };
 

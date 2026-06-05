@@ -181,3 +181,12 @@ html, body {
   pointer-events: none;
   user-select: none;
 }
+
+.term-line   { font-size: 11px; line-height: 1.5; word-break: break-all; }
+.term-recv   { color: #c8c8d8; }
+.term-send   { color: #27ae60; }
+.term-info   { color: #9090a8; font-style: italic; }
+
+.term-log-info  { color: #2980b9; }
+.term-log-warn  { color: #e67e22; font-weight: bold; }
+.term-log-error { color: #e74c3c; font-weight: bold; }

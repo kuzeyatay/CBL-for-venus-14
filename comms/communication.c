@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -391,6 +392,30 @@ void sendErrorMessage(const char *error_code)
              "ERROR,%s,%s",
              ROBOT_ID,
              error_code);
+
+    sendPayloadToESP32(payload);
+}
+
+void sendNavLog(const char *level, const char *format, ...)
+{
+    char message[UART_PAYLOAD_MAX_SIZE / 2];
+    char payload[UART_PAYLOAD_MAX_SIZE];
+    va_list args;
+
+    if (level == NULL) {
+        level = "INFO";
+    }
+
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    snprintf(payload,
+             sizeof(payload),
+             "LOG,%s,%s,%s",
+             ROBOT_ID,
+             level,
+             message);
 
     sendPayloadToESP32(payload);
 }

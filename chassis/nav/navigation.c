@@ -153,14 +153,17 @@ static void handleNavigationError(void);
 static field_event_t interpretSensorData(sensor_data_t data);
 
 static bool mission_running = false;
+static double state_entry_msec = 0.0;
 static bool map_initialized = false;
 static cell_status_t map_grid[MAP_SIZE][MAP_SIZE];
 
 static nav_state_t current_state = NAV_STATE_INIT;
 static grid_cell_t current_cell = {MAP_CENTER, MAP_CENTER};
 static grid_cell_t target_cell = {MAP_CENTER, MAP_CENTER};
-static grid_cell_t object_candidate_cell = {MAP_CENTER, MAP_CENTER};
-static int object_candidate_dir = -1;
+static grid_cell_t object_candidate_cells[NAV_DIR_COUNT];
+static int object_candidate_dirs[NAV_DIR_COUNT];
+static int object_candidate_count = 0;
+static int object_candidate_index = 0;
 
 static scan_evidence_t scan_evidence[NAV_DIR_COUNT];
 
@@ -405,12 +408,12 @@ static bool estimateSampleSize(float width_cm, int *sample_size_cm)
      * rotates around its wheel axis, not around the distance sensor itself.
      */
 
-    if (width_cm >= 1.5f && width_cm < 3.4f) {
+    if (width_cm >= 0.5f && width_cm < 3.5f) {
         *sample_size_cm = 3;
         return true;
     }
 
-    if (width_cm >= 3.4f && width_cm <= 7.5f) {
+    if (width_cm >= 3.5f && width_cm <= 9.0f) {
         *sample_size_cm = 6;
         return true;
     }
@@ -596,8 +599,40 @@ static nav_direction_t directionFromYaw(float yaw_deg)
     return NAV_DIR_NEG_Y;
 }
 
+static double stateTimeoutSeconds(nav_state_t state)
+{
+    switch (state) {
+        case NAV_STATE_SCAN_360:              return 90.0;
+        case NAV_STATE_MOVE_TO_TARGET_CENTER: return 30.0;
+        case NAV_STATE_BACKTRACK:             return 30.0;
+        case NAV_STATE_INVESTIGATE_OBJECT:    return 120.0;
+        case NAV_STATE_UPDATE_MAP:            return 15.0;
+        case NAV_STATE_CHOOSE_TARGET:         return 15.0;
+        case NAV_STATE_MARK_CURRENT:          return 15.0;
+        case NAV_STATE_INIT:                  return 15.0;
+        case NAV_STATE_SIDE_COMPLETE:         return 15.0;
+        case NAV_STATE_ERROR:                 return 0.0;
+        default:                              return 30.0;
+    }
+}
+
+static nav_state_t watchdogRecoveryState(nav_state_t timed_out_state)
+{
+    if (timed_out_state == NAV_STATE_MOVE_TO_TARGET_CENTER ||
+        timed_out_state == NAV_STATE_BACKTRACK) {
+        return NAV_STATE_BACKTRACK;
+    }
+
+    return NAV_STATE_CHOOSE_TARGET;
+}
+
 static void transitionTo(nav_state_t next_state, const char *reason)
 {
+    sendNavLog("INFO", "%s -> %s: %s",
+               navStateToString(current_state),
+               navStateToString(next_state),
+               reason == NULL ? "" : reason);
+
 #if NAV_DEBUG_STATE
     printf("NAV STATE: %s -> %s, reason=%s\n",
            navStateToString(current_state),
@@ -606,6 +641,7 @@ static void transitionTo(nav_state_t next_state, const char *reason)
 #endif
 
     current_state = next_state;
+    state_entry_msec = navNowMsec();
 }
 
 static void initMap(void)
@@ -629,8 +665,8 @@ static void resetNavigationRuntime(void)
     current_cell.x = MAP_CENTER;
     current_cell.y = MAP_CENTER;
     target_cell = current_cell;
-    object_candidate_cell = current_cell;
-    object_candidate_dir = -1;
+    object_candidate_count = 0;
+    object_candidate_index = 0;
     resetScanEvidence();
 }
 
@@ -779,6 +815,7 @@ static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg)
     }
 
     turnToYaw(final_yaw_deg, DEFAULT_SPEED);
+    odometryInit(target_pose.x, target_pose.y, final_yaw_deg);
     sendPoseUpdate();
 }
 
@@ -963,29 +1000,49 @@ static void runScan360(void)
 
     pose_t start_pose = getPose();
     float original_yaw = start_pose.yaw;
-    float scanned_deg = 0.0f;
     bool tape_scan_enabled = isTCS3200Calibrated();
+    int directions_scanned = 0;
 
     resetScanEvidence();
     recalibrateGyroIfReady();
 
-#if NAV_DEBUG_SCAN360
-    printf("SCAN360 START yaw=%.2f, step=%.2f, tape_scan=%s\n",
-           original_yaw,
-           SCAN_360_STEP_DEG,
-           tape_scan_enabled ? "enabled" : "disabled");
-#endif
+    printf("SCAN START cell=(%d,%d) yaw=%.2f scan=%d tape=%s\n",
+           current_cell.x, current_cell.y, original_yaw, scan_count,
+           tape_scan_enabled ? "yes" : "no");
 
-    while (scanned_deg <= 360.0f + 0.01f) {
-        pose_t pose = getPose();
-        float display_yaw = pose.yaw;
-        bool is_heading_check_ray = scanned_deg >= 360.0f - 0.01f;
-        nav_direction_t direction = directionFromYaw(pose.yaw);
-        distance_window_t distance_window =
+    for (int dir = 0; dir < NAV_DIR_COUNT; dir++) {
+        nav_direction_t direction = (nav_direction_t)dir;
+        grid_cell_t adj = adjacentCell(current_cell, direction);
+        float target_yaw = directionToYaw(direction);
+
+        /*
+         * Skip directions that are definitively known: explored cells the robot
+         * has physically been in, and terminal cells already classified.
+         * SCANNED_CLEAR is intentionally NOT skipped — edge objects near the
+         * boundary of a clear cell are still visible from the current position.
+         */
+        if (!isInsideMap(adj.x, adj.y) ||
+            !missionFrameLocalGridIndexIsInAssignedHalf(adj.x, adj.y)) {
+            printf("SCAN SKIP dir=%s (outside map/half)\n", directionName(direction));
+            continue;
+        }
+
+        cell_status_t adj_status = map_grid[adj.x][adj.y];
+
+        if (adj_status == CELL_EXPLORED || isTerminalCellStatus(adj_status)) {
+            printf("SCAN SKIP dir=%s cell=(%d,%d) status=%s\n",
+                   directionName(direction), adj.x, adj.y,
+                   cellStatusToString(adj_status));
+            continue;
+        }
+
+        turnToYaw(target_yaw, DEFAULT_SPEED);
+        directions_scanned++;
+
+        distance_window_t window =
             readDistanceWindow(SCAN_DISTANCE_READINGS_PER_ANGLE);
         bool close_object =
-            distanceWindowHasCloseObject(distance_window,
-                                         SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS);
+            distanceWindowHasCloseObject(window, SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS);
         bool raw_black = false;
         bool black_tape = false;
         bool clear = false;
@@ -995,81 +1052,50 @@ static void runScan360(void)
         }
 
         black_tape = shouldTreatBlackReadingAsTape(raw_black, close_object);
-        /*
-         * V1 only classifies adjacent cells.  A VL53 out-of-range reading means
-         * there is no close object in that direction, so it is useful clear
-         * evidence on an empty field instead of "no information".
-         */
         clear = !close_object && !black_tape;
 
-        if (!is_heading_check_ray) {
-            scan_evidence_t *evidence = &scan_evidence[direction];
+        scan_evidence_t *evidence = &scan_evidence[direction];
 
-            if (close_object) {
-                evidence->object_count++;
+        if (close_object) {
+            evidence->object_count++;
 
-                if (evidence->min_distance_mm == VL53L0X_INVALID_DISTANCE_MM ||
-                    distance_window.best_close_distance_mm < evidence->min_distance_mm) {
-                    evidence->min_distance_mm = distance_window.best_close_distance_mm;
-                }
-            } else if (black_tape) {
-                evidence->tape_count++;
-            } else if (clear) {
-                evidence->clear_count++;
+            if (evidence->min_distance_mm == VL53L0X_INVALID_DISTANCE_MM ||
+                window.best_close_distance_mm < evidence->min_distance_mm) {
+                evidence->min_distance_mm = window.best_close_distance_mm;
             }
-
-            sendScanRayUpdate(pose.yaw, distance_window.display_distance_mm);
+        } else if (black_tape) {
+            evidence->tape_count++;
+        } else if (clear) {
+            evidence->clear_count++;
         }
+
+        sendScanRayUpdate(target_yaw, window.display_distance_mm);
 
 #if NAV_DEBUG_SCAN360
-        if (is_heading_check_ray) {
-            display_yaw = 360.0f;
-        }
-
-        printf("SCAN360 RAY yaw=%.2f, dir=%s, distance=%d, close_reads=%d/%d, invalid_reads=%d, raw_black=%s, tape=%s, object=%s, clear=%s, counted=%s\n",
-               display_yaw,
+        printf("SCAN DIR dir=%s dist=%d close=%d/%d invalid=%d black=%s tape=%s object=%s clear=%s\n",
                directionName(direction),
-               distance_window.display_distance_mm,
-               distance_window.close_reading_count,
+               window.display_distance_mm,
+               window.close_reading_count,
                SCAN_DISTANCE_READINGS_PER_ANGLE,
-               distance_window.invalid_reading_count,
-               raw_black ? "yes" : "no",
-               black_tape ? "yes" : "no",
+               window.invalid_reading_count,
+               raw_black    ? "yes" : "no",
+               black_tape   ? "yes" : "no",
                close_object ? "yes" : "no",
-               clear ? "yes" : "no",
-               is_heading_check_ray ? "no" : "yes");
+               clear        ? "yes" : "no");
 #endif
-
-        if (is_heading_check_ray) {
-            break;
-        }
-
-        float remaining_deg = 360.0f - scanned_deg;
-        float step_deg = SCAN_360_STEP_DEG;
-
-        if (step_deg > remaining_deg) {
-            step_deg = remaining_deg;
-        }
-
-        scanned_deg += step_deg;
-
-        if (scanned_deg >= 360.0f - 0.01f) {
-            scanned_deg = 360.0f;
-            turnToYaw(original_yaw, DEFAULT_SPEED);
-        } else {
-            turn(step_deg, DEFAULT_SPEED);
-        }
     }
 
+    turnToYaw(original_yaw, DEFAULT_SPEED);
+
     pose_t completed_pose = getPose();
-    printf("SCAN360 COMPLETE original_yaw=%.2f, final_yaw=%.2f\n",
-           original_yaw,
-           completed_pose.yaw);
+    printf("SCAN COMPLETE cell=(%d,%d) dirs=%d/%d original_yaw=%.2f final_yaw=%.2f\n",
+           current_cell.x, current_cell.y,
+           directions_scanned, NAV_DIR_COUNT,
+           original_yaw, completed_pose.yaw);
 
     if (scan_count % SCAN_DRIFT_CORRECTION_INTERVAL == 0) {
-        printf("SCAN360 DRIFT CORRECTION scan=%d, extra=%.2f deg\n",
-               scan_count,
-               SCAN_DRIFT_CORRECTION_DEG);
+        printf("SCAN DRIFT CORRECTION scan=%d extra=%.2f deg\n",
+               scan_count, SCAN_DRIFT_CORRECTION_DEG);
         turn(SCAN_DRIFT_CORRECTION_DEG, DEFAULT_SPEED);
         completed_pose = getPose();
     }
@@ -1079,26 +1105,20 @@ static void runScan360(void)
 
 #if NAV_DEBUG_SCAN360
     for (int dir = 0; dir < NAV_DIR_COUNT; dir++) {
-        scan_evidence_t evidence = scan_evidence[dir];
-
-        printf("SCAN360 EVIDENCE dir=%s, clear=%d, object=%d, tape=%d, min_distance=%d\n",
+        scan_evidence_t e = scan_evidence[dir];
+        printf("SCAN EVIDENCE dir=%s clear=%d object=%d tape=%d min_distance=%d\n",
                directionName((nav_direction_t)dir),
-               evidence.clear_count,
-               evidence.object_count,
-               evidence.tape_count,
-               evidence.min_distance_mm);
+               e.clear_count, e.object_count, e.tape_count, e.min_distance_mm);
     }
 #endif
 
-    transitionTo(NAV_STATE_UPDATE_MAP, "360 scan complete");
+    transitionTo(NAV_STATE_UPDATE_MAP, "targeted scan complete");
 }
 
 static void updateMapFromScan(void)
 {
-    int best_object_distance_mm = VL53L0X_MAX_REASONABLE_MM + 1;
-
-    object_candidate_dir = -1;
-    object_candidate_cell = current_cell;
+    object_candidate_count = 0;
+    object_candidate_index = 0;
 
     for (int dir = 0; dir < NAV_DIR_COUNT; dir++) {
         nav_direction_t direction = (nav_direction_t)dir;
@@ -1144,10 +1164,10 @@ static void updateMapFromScan(void)
                    evidence.min_distance_mm);
 
             if (evidence.min_distance_mm > 0 &&
-                evidence.min_distance_mm < best_object_distance_mm) {
-                best_object_distance_mm = evidence.min_distance_mm;
-                object_candidate_dir = dir;
-                object_candidate_cell = cell;
+                object_candidate_count < NAV_DIR_COUNT) {
+                object_candidate_cells[object_candidate_count] = cell;
+                object_candidate_dirs[object_candidate_count] = dir;
+                object_candidate_count++;
             }
         } else if (evidence.clear_count >= SCAN_CLEAR_MIN_READINGS) {
             printf("MARK SCANNED_CLEAR cell=(%d,%d), dir=%s\n",
@@ -1158,9 +1178,14 @@ static void updateMapFromScan(void)
         }
     }
 
-    if (object_candidate_dir >= 0) {
+    sendNavLog("INFO", "Scan at (%d,%d) complete: %d candidate(s) found",
+               current_cell.x, current_cell.y, object_candidate_count);
+
+    if (object_candidate_count > 0) {
+        printf("SCAN360 found %d object candidate(s) to investigate\n",
+               object_candidate_count);
         transitionTo(NAV_STATE_INVESTIGATE_OBJECT,
-                     "strongest adjacent object candidate selected");
+                     "object candidates found");
     } else {
         transitionTo(NAV_STATE_CHOOSE_TARGET,
                      "no adjacent object candidate after map update");
@@ -1198,101 +1223,116 @@ static void chooseNextTarget(void)
 
 static void investigateObjectCandidate(void)
 {
-    if (object_candidate_dir < 0) {
-        transitionTo(NAV_STATE_CHOOSE_TARGET, "no object candidate to investigate");
-        return;
+    while (object_candidate_index < object_candidate_count) {
+        grid_cell_t candidate_cell = object_candidate_cells[object_candidate_index];
+        nav_direction_t direction   = (nav_direction_t)object_candidate_dirs[object_candidate_index];
+
+        if (!isInsideMap(candidate_cell.x, candidate_cell.y) ||
+            isTerminalCellStatus(map_grid[candidate_cell.x][candidate_cell.y])) {
+            printf("INVESTIGATE OBJECT %d/%d skipped dir=%s cell=(%d,%d)\n",
+                   object_candidate_index + 1,
+                   object_candidate_count,
+                   directionName(direction),
+                   candidate_cell.x,
+                   candidate_cell.y);
+            object_candidate_index++;
+            continue;
+        }
+
+        printf("INVESTIGATE OBJECT %d/%d dir=%s cell=(%d,%d)\n",
+               object_candidate_index + 1,
+               object_candidate_count,
+               directionName(direction),
+               candidate_cell.x,
+               candidate_cell.y);
+
+        pose_t saved_pose = getPose();
+
+        turnToYaw(directionToYaw(direction), DEFAULT_SPEED);
+
+        distance_window_t confirm_window =
+            readDistanceWindow(INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION);
+
+        if (!distanceWindowHasCloseObject(confirm_window,
+                                          INVESTIGATE_OBJECT_MIN_CLOSE_READINGS)) {
+            printf("Object confirmation failed: close_reads=%d/%d, invalid_reads=%d, distance=%d\n",
+                   confirm_window.close_reading_count,
+                   INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
+                   confirm_window.invalid_reading_count,
+                   confirm_window.display_distance_mm);
+            sendNavLog("WARN", "Object at %s rejected: only %d/%d close readings (dist=%dmm)",
+                       directionName(direction),
+                       confirm_window.close_reading_count,
+                       INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
+                       confirm_window.display_distance_mm);
+            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+            returnToPoseApprox(saved_pose);
+            object_candidate_index++;
+            continue;
+        }
+
+        moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+
+        sensor_data_t sensor_data = readReliableSensorData();
+        field_event_t event = interpretSensorData(sensor_data);
+
+        if (event.type == FIELD_SENSOR_FAULT) {
+            printf("Sensor fault on first attempt, retrying investigation\n");
+            sendNavLog("WARN", "Sensor fault at %s — retrying", directionName(direction));
+            sensor_data = readReliableSensorData();
+            event = interpretSensorData(sensor_data);
+        }
+
+        sendNavLog("INFO", "Object at %s: %s (width=%.1fcm, dist=%dmm)",
+                   directionName(direction),
+                   eventToString(event.type),
+                   event.width_cm,
+                   event.distance_mm);
+
+        switch (event.type) {
+            case FIELD_ROCK_SAMPLE:
+                finalizeRockSampleAtCloseRange(&event);
+                reportFieldEvent(event);
+                markSampleAtCell(candidate_cell);
+                returnToPoseApprox(saved_pose);
+                break;
+
+            case FIELD_HILL:
+                if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
+                    event.width_cm = HILL_PHYSICAL_SIZE_CM;
+                }
+
+                reportFieldEvent(event);
+                markHillBlockAroundCell(candidate_cell);
+                returnToPoseApprox(saved_pose);
+                break;
+
+            case FIELD_BLACK_TAPE:
+                reportFieldEvent(event);
+                markTapeAtCell(candidate_cell);
+                returnToPoseApprox(saved_pose);
+                break;
+
+            case FIELD_SENSOR_FAULT:
+                printf("Object confirmation failed: sensor fault\n");
+                reportFieldEvent(event);
+                setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+                returnToPoseApprox(saved_pose);
+                break;
+
+            case FIELD_CLEAR:
+            default:
+                printf("Object confirmation failed: event=%s\n",
+                       eventToString(event.type));
+                setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+                returnToPoseApprox(saved_pose);
+                break;
+        }
+
+        object_candidate_index++;
     }
 
-    if (!isInsideMap(object_candidate_cell.x, object_candidate_cell.y)) {
-        transitionTo(NAV_STATE_CHOOSE_TARGET, "object candidate outside map");
-        return;
-    }
-
-    if (isTerminalCellStatus(map_grid[object_candidate_cell.x][object_candidate_cell.y])) {
-        transitionTo(NAV_STATE_CHOOSE_TARGET,
-                     "object candidate already classified as terminal");
-        return;
-    }
-
-    pose_t saved_pose = getPose();
-    nav_direction_t direction = (nav_direction_t)object_candidate_dir;
-
-    printf("INVESTIGATE OBJECT dir=%s, cell=(%d,%d)\n",
-           directionName(direction),
-           object_candidate_cell.x,
-           object_candidate_cell.y);
-
-    turnToYaw(directionToYaw(direction), DEFAULT_SPEED);
-
-    distance_window_t confirm_window =
-        readDistanceWindow(INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION);
-
-    if (!distanceWindowHasCloseObject(confirm_window,
-                                      INVESTIGATE_OBJECT_MIN_CLOSE_READINGS)) {
-        printf("Object confirmation failed: close_reads=%d/%d, invalid_reads=%d, distance=%d\n",
-               confirm_window.close_reading_count,
-               INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION,
-               confirm_window.invalid_reading_count,
-               confirm_window.display_distance_mm);
-        setMapCellStatus(object_candidate_cell.x,
-                         object_candidate_cell.y,
-                         CELL_SCANNED_CLEAR);
-        returnToPoseApprox(saved_pose);
-        object_candidate_dir = -1;
-        transitionTo(NAV_STATE_CHOOSE_TARGET,
-                     "object candidate rejected by distance window");
-        return;
-    }
-
-    sensor_data_t sensor_data = readReliableSensorData();
-    field_event_t event = interpretSensorData(sensor_data);
-
-    switch (event.type) {
-        case FIELD_ROCK_SAMPLE:
-            finalizeRockSampleAtCloseRange(&event);
-            reportFieldEvent(event);
-            markSampleAtCell(object_candidate_cell);
-            returnToPoseApprox(saved_pose);
-            break;
-
-        case FIELD_HILL:
-            if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
-                event.width_cm = HILL_PHYSICAL_SIZE_CM;
-            }
-
-            reportFieldEvent(event);
-            markHillBlockAroundCell(object_candidate_cell);
-            returnToPoseApprox(saved_pose);
-            break;
-
-        case FIELD_BLACK_TAPE:
-            reportFieldEvent(event);
-            markTapeAtCell(object_candidate_cell);
-            returnToPoseApprox(saved_pose);
-            break;
-
-        case FIELD_SENSOR_FAULT:
-            printf("Object confirmation failed: sensor fault\n");
-            reportFieldEvent(event);
-            setMapCellStatus(object_candidate_cell.x,
-                             object_candidate_cell.y,
-                             CELL_SCANNED_CLEAR);
-            returnToPoseApprox(saved_pose);
-            break;
-
-        case FIELD_CLEAR:
-        default:
-            printf("Object confirmation failed: event=%s\n",
-                   eventToString(event.type));
-            setMapCellStatus(object_candidate_cell.x,
-                             object_candidate_cell.y,
-                             CELL_SCANNED_CLEAR);
-            returnToPoseApprox(saved_pose);
-            break;
-    }
-
-    object_candidate_dir = -1;
-    transitionTo(NAV_STATE_CHOOSE_TARGET, "object investigation complete");
+    transitionTo(NAV_STATE_CHOOSE_TARGET, "all object candidates investigated");
 }
 
 static void handleMovementObject(grid_cell_t affected_cell,
@@ -1397,6 +1437,8 @@ static void moveToTargetCenter(void)
 
         if (total_moved_cm > CELL_SIZE_CM * 2.0f &&
             distance_cm > CELL_CENTER_REACHED_TOLERANCE_CM) {
+            sendNavLog("WARN", "Overshot target (%d,%d) after %.1fcm — heading wrong, aborting",
+                       target_cell.x, target_cell.y, total_moved_cm);
             printf("MOVE TARGET CENTER overshot: moved=%.2f cm, distance_remaining=%.2f cm — aborting\n",
                    total_moved_cm,
                    distance_cm);
@@ -1433,6 +1475,9 @@ static void moveToTargetCenter(void)
                 event.sample_size_cm = 0;
                 event.temperature_c = 0.0f;
 
+                sendNavLog("WARN", "Tape at target (%d,%d) — reversing to (%d,%d)",
+                           target_cell.x, target_cell.y,
+                           return_cell.x, return_cell.y);
                 printf("MOVE TARGET CENTER final tape safety stop target=(%d,%d), distance=%d, close_reads=%d/%d, invalid_reads=%d\n",
                        target_cell.x,
                        target_cell.y,
@@ -1480,6 +1525,9 @@ static void moveToTargetCenter(void)
             event.sample_size_cm = 0;
             event.temperature_c = 0.0f;
 
+            sendNavLog("WARN", "Tape during move to (%d,%d) — reversing to (%d,%d)",
+                       target_cell.x, target_cell.y,
+                       return_cell.x, return_cell.y);
             printf("MOVE TARGET CENTER tape safety stop target=(%d,%d), distance=%d, close_reads=%d/%d, invalid_reads=%d\n",
                    target_cell.x,
                    target_cell.y,
@@ -1497,6 +1545,9 @@ static void moveToTargetCenter(void)
         }
 
         if (close_object) {
+            sendNavLog("WARN", "Object during move to (%d,%d): dist=%dmm",
+                       target_cell.x, target_cell.y,
+                       front_window.display_distance_mm);
             printf("MOVE TARGET CENTER object safety stop target=(%d,%d), distance=%d, close_reads=%d/%d, invalid_reads=%d, raw_black=%s\n",
                    target_cell.x,
                    target_cell.y,
@@ -1551,11 +1602,14 @@ static void handleBacktrack(void)
         printf("DFS BACKTRACK target=(%d,%d)\n",
                target_cell.x,
                target_cell.y);
+        sendNavLog("INFO", "Backtracking to (%d,%d), %d cells remain in stack",
+                   target_cell.x, target_cell.y, dfs_stack_top);
         transitionTo(NAV_STATE_MOVE_TO_TARGET_CENTER,
                      "valid adjacent explored backtrack cell");
         return;
     }
 
+    sendNavLog("WARN", "DFS stack empty — no reachable explored cells");
     transitionTo(NAV_STATE_SIDE_COMPLETE, "DFS stack empty");
 }
 
@@ -1591,6 +1645,8 @@ static void handleSideComplete(void)
            blocked_count,
            dfs_stack_top);
 
+    sendNavLog("INFO", "Side complete — explored: %d  blocked: %d  unknown: %d  clear: %d",
+               explored_count, blocked_count, unknown_count, scanned_clear_count);
     sendStatusUpdate("side_complete", "none");
     mission_running = false;
 }
@@ -1598,6 +1654,7 @@ static void handleSideComplete(void)
 static void handleNavigationError(void)
 {
     printf("Navigation error: stopping mission\n");
+    sendNavLog("ERROR", "Navigation error — mission stopped");
     sendErrorMessage("navigation_error");
     sendStatusUpdate("fault", "navigation_error");
     mission_running = false;
@@ -1697,6 +1754,7 @@ void runNavigation(void)
     nav_log_timestamps_enabled = false;
     printf("Starting V1 scan-based cell exploration...\n");
     nav_log_start_msec = navNowMsec();
+    state_entry_msec   = nav_log_start_msec;
     nav_log_timestamps_enabled = true;
 
     while (mission_running) {
@@ -1708,6 +1766,21 @@ void runNavigation(void)
 
         if (fsm_cycles > max_fsm_cycles) {
             transitionTo(NAV_STATE_ERROR, "FSM cycle limit exceeded");
+        }
+
+        /* Watchdog: recover if a state has run longer than its allowed budget */
+        {
+            double timeout_sec = stateTimeoutSeconds(current_state);
+            double elapsed_sec = (navNowMsec() - state_entry_msec) / 1000.0;
+
+            if (timeout_sec > 0.0 && elapsed_sec > timeout_sec) {
+                nav_state_t recovery = watchdogRecoveryState(current_state);
+                sendNavLog("ERROR", "Watchdog: %s timed out after %.1fs — recovering to %s",
+                           navStateToString(current_state),
+                           elapsed_sec,
+                           navStateToString(recovery));
+                transitionTo(recovery, "watchdog timeout");
+            }
         }
 
         switch (current_state) {

@@ -16,5 +16,6 @@ void sendCellUpdate(int local_grid_x, int local_grid_y, cell_status_t status);
 void sendScanRayUpdate(float yaw, int distance_mm);
 void sendStatusUpdate(const char *state, const char *error_code);
 void sendErrorMessage(const char *error_code);
+void sendNavLog(const char *level, const char *format, ...);
 
 #endif
