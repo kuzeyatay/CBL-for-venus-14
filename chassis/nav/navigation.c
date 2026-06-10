@@ -887,25 +887,42 @@ static void reportFieldEvent(field_event_t event)
 
 static void markHillBlockAroundCell(grid_cell_t center_cell)
 {
-    float hill_cells = HILL_PHYSICAL_SIZE_CM / CELL_SIZE_CM;
-    int base_radius = (int)ceilf((hill_cells - 1.0f) / 2.0f);
+    /*
+     * A ~30 cm hill spans roughly a 2x2 block of 15 cm cells.  A 2x2 has no
+     * center cell, so anchor it on the detected cell and extend it away from
+     * the robot (the hill lies beyond the detection point) plus one cell to
+     * one lateral side.  The forward direction comes from robot -> hill.
+     */
+    int fwd_x = center_cell.x - current_cell.x;
+    int fwd_y = center_cell.y - current_cell.y;
 
-    if (base_radius < 1) {
-        base_radius = 1;
+    if (fwd_x == 0 && fwd_y == 0) {
+        fwd_x = 1;  /* fallback if the hill was detected on the current cell */
     }
 
-    int radius = base_radius + HILL_FOOTPRINT_MARGIN_CELLS;
+    if (fwd_x > 0) {
+        fwd_x = 1;
+    } else if (fwd_x < 0) {
+        fwd_x = -1;
+    }
 
-    printf("MARK HILL center=(%d,%d), radius=%d cells, physical_size=%.2f cm\n",
-           center_cell.x,
-           center_cell.y,
-           radius,
-           HILL_PHYSICAL_SIZE_CM);
+    if (fwd_y > 0) {
+        fwd_y = 1;
+    } else if (fwd_y < 0) {
+        fwd_y = -1;
+    }
 
-    for (int dx = -radius; dx <= radius; dx++) {
-        for (int dy = -radius; dy <= radius; dy++) {
-            int x = center_cell.x + dx;
-            int y = center_cell.y + dy;
+    /* Lateral cell: perpendicular to forward (forward rotated +90 degrees). */
+    int perp_x = -fwd_y;
+    int perp_y = fwd_x;
+
+    printf("MARK HILL 2x2 center=(%d,%d), fwd=(%d,%d), perp=(%d,%d)\n",
+           center_cell.x, center_cell.y, fwd_x, fwd_y, perp_x, perp_y);
+
+    for (int f = 0; f <= 1; f++) {
+        for (int p = 0; p <= 1; p++) {
+            int x = center_cell.x + f * fwd_x + p * perp_x;
+            int y = center_cell.y + f * fwd_y + p * perp_y;
 
             if (!isInsideMap(x, y)) {
                 continue;
