@@ -57,18 +57,12 @@ def on_message_83(client, userdata, message):
     payload_str = message.payload.decode().strip()
     print(parse_protocol_message(payload_str))
     send_to_websocket(payload_str)
-    # Cross-forward to robot 81
-    client81.publish(ROBOT_81_RECV, message.payload)
-    print("Forwarded 83 → 81")
 
 
 def on_message_81(client, userdata, message):
     payload_str = message.payload.decode().strip()
     print(parse_protocol_message(payload_str))
     send_to_websocket(payload_str)
-    # Cross-forward to robot 83
-    client83.publish(ROBOT_83_RECV, message.payload)
-    print("Forwarded 81 → 83")
 
 
 # ---------------------------------------------------------------------------
