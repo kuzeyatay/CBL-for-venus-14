@@ -385,7 +385,6 @@ function sidebarEmpty() {
             <div class="sb-legend-item"><span class="sb-status-dot" style="background:#ffe8e8"></span> Unsafe</div>
             <div class="sb-legend-item"><span class="sb-status-dot" style="background:#e8e8e8;border:1px solid #d0d0d0"></span> Tape</div>
             <div class="sb-legend-item"><span class="sb-status-dot" style="background:#f5e8d0"></span> Hill</div>
-            <div class="sb-legend-item"><span class="sb-status-dot" style="background:#f0e0f8"></span> Sample</div>
         </div>
     `;
 }

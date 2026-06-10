@@ -87,7 +87,10 @@ function parseCSVMessage(raw) {
             if (parts.length < 5) { console.warn('[client] Malformed CELL_UPDATE:', raw); return; }
             const cellX  = parseInt(parts[2], 10);
             const cellY  = parseInt(parts[3], 10);
-            const status = parts[4].trim().toLowerCase();
+            let   status = parts[4].trim().toLowerCase();
+            // A classified-sample cell is just an explored cell; the rock sample
+            // itself is shown as a separate content icon, so don't tint it purple.
+            if (status === 'sample') status = 'explored';
             if (!isNaN(cellX) && !isNaN(cellY)) updateCellStatus(cellX, cellY, status);
             break;
         }

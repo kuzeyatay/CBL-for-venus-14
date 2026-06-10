@@ -757,10 +757,28 @@ static void returnToPoseApprox(pose_t saved_pose)
     float distance_cm = sqrtf(delta_x * delta_x + delta_y * delta_y);
 
     if (distance_cm > CELL_CENTER_REACHED_TOLERANCE_CM) {
-        printf("RETURN CELL CENTER: distance=%.2f cm\n", distance_cm);
-        turnTowardPoint(saved_pose.x, saved_pose.y, DEFAULT_SPEED);
-        moveWithRamp(distance_cm, DEFAULT_SPEED);
-        sendPoseUpdate();
+        float target_yaw = atan2f(delta_y, delta_x) * 180.0f / PI;
+        float reverse_yaw = normalizeAngle(target_yaw + 180.0f);
+        float reverse_alignment_error =
+            fabsf(shortestAngleDelta(reverse_yaw, pose.yaw));
+
+        if (reverse_alignment_error <= REVERSE_TO_CELL_ALIGNMENT_TOLERANCE_DEG) {
+            /* The saved point is directly behind the robot — the usual case
+             * after approaching an object head-on.  Back straight out instead
+             * of spinning 180 degrees, driving forward, and spinning back. */
+            printf("RETURN CELL CENTER reverse: distance=%.2f cm, alignment_error=%.2f deg\n",
+                   distance_cm,
+                   reverse_alignment_error);
+            moveWithRamp(-distance_cm, DEFAULT_SPEED);
+            sendPoseUpdate();
+        } else {
+            printf("RETURN CELL CENTER forward: distance=%.2f cm, alignment_error=%.2f deg\n",
+                   distance_cm,
+                   reverse_alignment_error);
+            turnTowardPoint(saved_pose.x, saved_pose.y, DEFAULT_SPEED);
+            moveWithRamp(distance_cm, DEFAULT_SPEED);
+            sendPoseUpdate();
+        }
     }
 
     turnToYaw(saved_pose.yaw, DEFAULT_SPEED);
@@ -1170,7 +1188,15 @@ static void runScan360(void)
     printf("SCAN COMPLETE cell=(%d,%d) original_yaw=%.2f final_yaw=%.2f\n",
            current_cell.x, current_cell.y, original_yaw, completed_pose.yaw);
 
-    odometryInit(completed_pose.x, completed_pose.y, original_yaw);
+    /* The robot scans in place, so it is physically at the current cell center.
+     * A mid-scan object investigation drives forward and returns only
+     * approximately, leaving odometry x/y biased toward the investigated cell.
+     * Re-anchor to the known cell center so the next turnTowardPoint() does not
+     * aim from a drifted position and send the robot off in the wrong (often
+     * backward) direction. */
+    odometryInit(cellCenterXCm(current_cell),
+                 cellCenterYCm(current_cell),
+                 original_yaw);
     sendPoseUpdate();
 
 #if NAV_DEBUG_SCAN360
