@@ -128,7 +128,20 @@
 #define SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS 2
 #define SCAN_CLEAR_MIN_READINGS 1
 #define SCAN_OBJECT_MIN_READINGS 1
-#define SCAN_TAPE_MIN_READINGS 1
+/* A single black ray in a 90-degree arc is more likely an A4 sheet seam or a
+ * shadow crossing the color sensor's sweep circle than boundary tape; demand
+ * a second black ray before walling the cell off as tape. */
+#define SCAN_TAPE_MIN_READINGS 2
+
+/* Black-tape confirmation during movement: one dark floor blip (sheet seam,
+ * shadow edge) must not permanently mark a cell as tape.  After a raw black
+ * reading the robot re-samples the floor at small forward offsets; real
+ * boundary tape (>= 14 mm wide) stays black across neighbouring offsets,
+ * a paper seam does not. */
+#define TAPE_CONFIRM_SAMPLE_COUNT 3
+#define TAPE_CONFIRM_MIN_BLACK 2
+#define TAPE_CONFIRM_NUDGE_CM 1.0f
+#define TAPE_CONFIRM_NUDGE_SPEED_CM_S 4.0f
 
 #define MOVE_DISTANCE_READINGS_PER_CHECK 4
 #define MOVE_OBJECT_MIN_CLOSE_READINGS 4
@@ -144,10 +157,10 @@
 #define NAV_DEBUG_DFS 1
 
 /* Sensor/navigation thresholds */
-#define FRONT_OBJECT_MIN_DISTANCE_MM 50
-#define FRONT_OBJECT_MAX_DISTANCE_MM 200
+#define FRONT_OBJECT_MIN_DISTANCE_MM 45
+#define FRONT_OBJECT_MAX_DISTANCE_MM 350
 #define FRONT_OBJECT_THRESHOLD_MM FRONT_OBJECT_MAX_DISTANCE_MM
-#define SENSOR_RETRY_COUNT 3
+#define SENSOR_RETRY_COUNT 2
 
 #define WIDTH_SCAN_STEP_DEG 5.0f
 #define WIDTH_SCAN_MAX_DEG 55.0f
@@ -184,6 +197,13 @@
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 #define SAMPLE_APPROACH_MAX_CM 20.0f
 #define SAMPLE_APPROACH_SPEED_CM_S 5.0f
+/* Closed-loop approach: up to MAX_ATTEMPTS read-correct cycles, each reading
+ * a median of READINGS samples. Readings beyond the front-object window by
+ * more than the background margin mean the beam slipped off the object and
+ * are ignored instead of being driven toward. */
+#define SAMPLE_APPROACH_MAX_ATTEMPTS 4
+#define SAMPLE_APPROACH_READINGS 3
+#define SAMPLE_APPROACH_BACKGROUND_MARGIN_MM 50
 
 #define POST_MOVE_SCAN_TOTAL_DEG 60.0f
 #define POST_MOVE_SCAN_STEP_DEG 10.0f

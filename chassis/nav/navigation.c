@@ -104,6 +104,8 @@ static bool distanceWindowHasCloseObject(distance_window_t window,
                                          int required_close_readings);
 static bool poseToGridCell(float x_cm, float y_cm, int *grid_x, int *grid_y);
 static bool poseToCurrentGridCell(grid_cell_t *cell);
+static grid_cell_t projectMeasuredObjectCell(int distance_mm,
+                                             grid_cell_t fallback_cell);
 static bool shouldTreatBlackReadingAsTape(bool black_detected,
                                           bool close_front_object_detected);
 static bool estimateSampleSize(float width_cm, int *sample_size_cm);
@@ -117,6 +119,7 @@ static float cellCenterYCm(grid_cell_t cell);
 static float shortestAngleDelta(float target_yaw_deg, float current_yaw_deg);
 
 static distance_window_t readDistanceWindow(int reading_count);
+static int readMedianUsableDistanceMm(int reading_count);
 
 static grid_cell_t adjacentCell(grid_cell_t cell, nav_direction_t direction);
 
@@ -131,7 +134,7 @@ static void turnToYaw(float target_yaw_deg, float speed_cm_s);
 static void turnTowardPoint(float target_x_cm, float target_y_cm, float speed_cm_s);
 static void returnToPoseApprox(pose_t saved_pose);
 static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg);
-static void moveToDistanceFromObject(int target_distance_mm);
+static bool moveToDistanceFromObject(int target_distance_mm);
 static void finalizeRockSampleAtCloseRange(field_event_t *event);
 static void reportFieldEvent(field_event_t event);
 static void markHillBlockAroundCell(grid_cell_t center_cell);
@@ -393,6 +396,41 @@ static bool poseToCurrentGridCell(grid_cell_t *cell)
     return true;
 }
 
+/*
+ * Cell containing the object surface the distance sensor is looking at: the
+ * current pose projected forward by the measured distance.  The scan
+ * candidate cell is only "the next cell in that direction" and falls short
+ * when the object sits further away, which would anchor the hill footprint
+ * one or more cells toward the robot, away from where the EVENT icon lands
+ * (sendFieldEventUpdate uses this same projection).
+ */
+static grid_cell_t projectMeasuredObjectCell(int distance_mm,
+                                             grid_cell_t fallback_cell)
+{
+    pose_t pose = getPose();
+    float distance_cm =
+        distance_mm > 0 ? (float)distance_mm / 10.0f : CELL_SIZE_CM;
+    float yaw_rad = pose.yaw * PI / 180.0f;
+    float object_x_cm = pose.x + distance_cm * cosf(yaw_rad);
+    float object_y_cm = pose.y + distance_cm * sinf(yaw_rad);
+    grid_cell_t cell = fallback_cell;
+    int grid_x = 0;
+    int grid_y = 0;
+
+    if (poseToGridCell(object_x_cm, object_y_cm, &grid_x, &grid_y)) {
+        cell.x = grid_x;
+        cell.y = grid_y;
+    } else {
+        printf("PROJECT OBJECT CELL outside map: x=%.2f, y=%.2f, fallback=(%d,%d)\n",
+               object_x_cm,
+               object_y_cm,
+               fallback_cell.x,
+               fallback_cell.y);
+    }
+
+    return cell;
+}
+
 static bool shouldTreatBlackReadingAsTape(bool black_detected,
                                           bool close_front_object_detected)
 {
@@ -402,6 +440,39 @@ static bool shouldTreatBlackReadingAsTape(bool black_detected,
      * close object in front of the robot according to the VL53L0X.
      */
     return black_detected && !close_front_object_detected;
+}
+
+/*
+ * Confirm a raw black floor reading before treating it as boundary tape.
+ * Re-samples the floor at TAPE_CONFIRM_NUDGE_CM forward offsets: boundary
+ * tape is wide enough to stay black across neighbouring positions, while an
+ * A4 sheet seam or a shadow edge reads black at most once.  May leave the
+ * robot up to (TAPE_CONFIRM_SAMPLE_COUNT - 1) nudges further forward; the
+ * caller's pose-based loop replans from the updated odometry.
+ */
+static bool confirmBlackTapeReading(void)
+{
+    int black_count = 1;  /* the caller's triggering reading */
+
+    for (int sample = 1; sample < TAPE_CONFIRM_SAMPLE_COUNT; sample++) {
+        if (black_count >= TAPE_CONFIRM_MIN_BLACK) {
+            break;  /* confirmed — stop creeping toward the tape */
+        }
+
+        moveWithRamp(TAPE_CONFIRM_NUDGE_CM, TAPE_CONFIRM_NUDGE_SPEED_CM_S);
+        sendPoseUpdate();
+
+        if (tcs3200DetectBlackTape()) {
+            black_count++;
+        }
+    }
+
+    printf("TAPE CONFIRM black=%d/%d (min %d)\n",
+           black_count,
+           TAPE_CONFIRM_SAMPLE_COUNT,
+           TAPE_CONFIRM_MIN_BLACK);
+
+    return black_count >= TAPE_CONFIRM_MIN_BLACK;
 }
 
 static bool estimateSampleSize(float width_cm, int *sample_size_cm)
@@ -547,6 +618,42 @@ static distance_window_t readDistanceWindow(int reading_count)
     }
 
     return window;
+}
+
+static int readMedianUsableDistanceMm(int reading_count)
+{
+    int sorted_readings[SAMPLE_APPROACH_READINGS];
+    int valid_count = 0;
+
+    if (reading_count > SAMPLE_APPROACH_READINGS) {
+        reading_count = SAMPLE_APPROACH_READINGS;
+    }
+
+    for (int i = 0; i < reading_count; i++) {
+        int distance_mm = readVL53L0XDistance();
+
+        if (!isUsableDistance(distance_mm)) {
+            continue;
+        }
+
+        int j = valid_count;
+
+        while (j > 0 && sorted_readings[j - 1] > distance_mm) {
+            sorted_readings[j] = sorted_readings[j - 1];
+            j--;
+        }
+
+        sorted_readings[j] = distance_mm;
+        valid_count++;
+    }
+
+    if (valid_count == 0) {
+        return VL53L0X_INVALID_DISTANCE_MM;
+    }
+
+    /* Lower median: with an even count, prefer the closer reading so the
+     * approach errs toward stopping short rather than ramming the object. */
+    return sorted_readings[(valid_count - 1) / 2];
 }
 
 static grid_cell_t adjacentCell(grid_cell_t cell, nav_direction_t direction)
@@ -831,50 +938,91 @@ static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg)
     sendPoseUpdate();
 }
 
-static void moveToDistanceFromObject(int target_distance_mm)
+/*
+ * Closed-loop positioning at a sensing distance from the object in front.
+ * Width classification is only valid at INVESTIGATE_APPROACH_DISTANCE_MM and
+ * the color read at SAMPLE_COLOR_DISTANCE_MM, so the robot must actually
+ * reach the requested distance: read, correct, re-read until within
+ * tolerance instead of trusting one reading and one open-loop move.
+ * Returns true when the final verified distance is within tolerance.
+ */
+static bool moveToDistanceFromObject(int target_distance_mm)
 {
-    int distance_mm = readVL53L0XDistance();
+    int last_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
 
-    if (!isUsableDistance(distance_mm)) {
-        printf("Sample approach failed: invalid distance reading = %d mm\n",
+    for (int attempt = 1; attempt <= SAMPLE_APPROACH_MAX_ATTEMPTS; attempt++) {
+        int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
+
+        if (!isUsableDistance(distance_mm)) {
+            printf("Sample approach %d/%d: invalid distance reading\n",
+                   attempt, SAMPLE_APPROACH_MAX_ATTEMPTS);
+            continue;
+        }
+
+        /* Approaches only start with the object inside the front-object
+         * window. A reading far beyond it means the beam slipped off the
+         * object onto the background; moving toward it would ram the object. */
+        if (distance_mm > FRONT_OBJECT_MAX_DISTANCE_MM +
+                              SAMPLE_APPROACH_BACKGROUND_MARGIN_MM) {
+            printf("Sample approach %d/%d: background reading %d mm ignored\n",
+                   attempt, SAMPLE_APPROACH_MAX_ATTEMPTS, distance_mm);
+            continue;
+        }
+
+        last_distance_mm = distance_mm;
+
+        int error_mm = distance_mm - target_distance_mm;
+        int abs_error_mm = error_mm < 0 ? -error_mm : error_mm;
+
+        if (abs_error_mm <= SAMPLE_APPROACH_TOLERANCE_MM) {
+            printf("Sample approach done: %d mm (target %d mm)\n",
+                   distance_mm, target_distance_mm);
+            return true;
+        }
+
+        if (attempt == SAMPLE_APPROACH_MAX_ATTEMPTS) {
+            break;
+        }
+
+        float move_cm = (float)error_mm / 10.0f;
+
+        if (move_cm > SAMPLE_APPROACH_MAX_CM) {
+            move_cm = SAMPLE_APPROACH_MAX_CM;
+        }
+
+        if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
+            move_cm = -SAMPLE_APPROACH_MAX_CM;
+        }
+
+        printf("Sample approach %d/%d: moving %.2f cm to reach %d mm, current %d mm\n",
+               attempt,
+               SAMPLE_APPROACH_MAX_ATTEMPTS,
+               move_cm,
+               target_distance_mm,
                distance_mm);
-        return;
+
+        moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
+        sendPoseUpdate();
     }
 
-    int error_mm = distance_mm - target_distance_mm;
-    int abs_error_mm = error_mm < 0 ? -error_mm : error_mm;
-
-    if (abs_error_mm <= SAMPLE_APPROACH_TOLERANCE_MM) {
-        printf("Already close enough for color reading: %d mm\n", distance_mm);
-        return;
-    }
-
-    float move_cm = (float)error_mm / 10.0f;
-
-    if (move_cm > SAMPLE_APPROACH_MAX_CM) {
-        move_cm = SAMPLE_APPROACH_MAX_CM;
-    }
-
-    if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
-        move_cm = -SAMPLE_APPROACH_MAX_CM;
-    }
-
-    printf("Moving %.2f cm to reach %d mm from sample. Current distance = %d mm\n",
-           move_cm,
-           target_distance_mm,
-           distance_mm);
-
-    moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
-    sendPoseUpdate();
+    sendNavLog("WARN", "Approach to %dmm did not converge (last reading %dmm)",
+               target_distance_mm, last_distance_mm);
+    return false;
 }
 
 static void finalizeRockSampleAtCloseRange(field_event_t *event)
 {
-    moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM);
+    bool at_color_distance = moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM);
 
     event->distance_mm = readVL53L0XDistance();
 
-    if (isTCS3200Calibrated()) {
+    if (!at_color_distance) {
+        /* Color read from the wrong distance returns the floor/background
+         * color, which is worse than reporting no color at all. */
+        printf("Color reading skipped: not at %d mm color distance\n",
+               SAMPLE_COLOR_DISTANCE_MM);
+        event->color = COLOR_UNKNOWN;
+    } else if (isTCS3200Calibrated()) {
         event->color = classifyTCS3200Color();
     } else {
         printf("Cannot classify rock color: TCS3200 is not calibrated.\n");
@@ -1388,13 +1536,20 @@ static void investigateObjectAt(grid_cell_t candidate_cell,
             break;
         }
 
-        case FIELD_HILL:
+        case FIELD_HILL: {
             if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
                 event.width_cm = HILL_PHYSICAL_SIZE_CM;
             }
+            /* Anchor the footprint on the cell the measured distance points
+             * at, not the scan candidate cell: a hill seen through an
+             * adjacent cell sits further away, and anchoring on the candidate
+             * drags the 2x2 block toward the robot, off the real hill. */
+            grid_cell_t hill_cell =
+                projectMeasuredObjectCell(event.distance_mm, candidate_cell);
             reportFieldEvent(event);
-            markHillBlockAroundCell(candidate_cell);
+            markHillBlockAroundCell(hill_cell);
             break;
+        }
 
         case FIELD_BLACK_TAPE:
             reportFieldEvent(event);
@@ -1459,6 +1614,12 @@ static void handleMovementObject(grid_cell_t affected_cell,
         return;
     }
 
+    /* The robot stops wherever the object first entered the front-object
+     * window, which is usually closer than the width-classification
+     * distance. Back up to it first, like the scan-360 investigation path,
+     * so the width scan geometry matches the tuned thresholds. */
+    moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+
     sensor_data_t sensor_data = readReliableSensorData();
     field_event_t event = interpretSensorData(sensor_data);
 
@@ -1474,14 +1635,17 @@ static void handleMovementObject(grid_cell_t affected_cell,
             markSampleAtCell(affected_cell);
             break;
 
-        case FIELD_HILL:
+        case FIELD_HILL: {
             if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
                 event.width_cm = HILL_PHYSICAL_SIZE_CM;
             }
 
+            grid_cell_t hill_cell =
+                projectMeasuredObjectCell(event.distance_mm, affected_cell);
             reportFieldEvent(event);
-            markHillBlockAroundCell(affected_cell);
+            markHillBlockAroundCell(hill_cell);
             break;
+        }
 
         case FIELD_BLACK_TAPE:
             reportFieldEvent(event);
@@ -1565,6 +1729,13 @@ static void moveToTargetCenter(void)
             final_black_tape =
                 shouldTreatBlackReadingAsTape(final_raw_black, final_close_object);
 
+            if (final_black_tape && !confirmBlackTapeReading()) {
+                printf("MOVE TARGET CENTER black blip at target (%d,%d) rejected after confirmation\n",
+                       target_cell.x,
+                       target_cell.y);
+                final_black_tape = false;
+            }
+
             if (final_black_tape) {
                 field_event_t event;
                 /* Project the event to the target cell center (where the tape
@@ -1622,6 +1793,15 @@ static void moveToTargetCenter(void)
         }
 
         black_tape = shouldTreatBlackReadingAsTape(raw_black, close_object);
+
+        if (black_tape && !confirmBlackTapeReading()) {
+            printf("MOVE TARGET CENTER black blip rejected after confirmation, resuming move to (%d,%d)\n",
+                   target_cell.x,
+                   target_cell.y);
+            /* The confirmation nudges advanced the robot; restart the loop so
+             * the remaining distance is recomputed before the next increment. */
+            continue;
+        }
 
         if (black_tape) {
             field_event_t event;

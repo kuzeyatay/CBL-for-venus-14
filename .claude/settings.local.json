@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($gcc = Get-Command gcc -ErrorAction SilentlyContinue; $clang = Get-Command clang -ErrorAction SilentlyContinue; \"gcc: $\\(if \\($gcc\\) { $gcc.Source } else { 'not found' }\\)\"; \"clang: $\\(if \\($clang\\) { $clang.Source } else { 'not found' }\\)\")",
+      "PowerShell(gcc -fsyntax-only -Wall -Wextra -I constants -I chassis\\\\nav -I chassis\\\\odom -I chassis\\\\drive -I sensors -I sensors\\\\distance -I sensors\\\\color -I sensors\\\\temperature -I comms chassis\\\\nav\\\\navigation.c)",
+      "PowerShell(gcc -fsyntax-only -Wall -Wextra -I . -I constants -I chassis\\\\nav -I chassis\\\\odom -I chassis\\\\drive -I sensors -I sensors\\\\distance -I sensors\\\\color -I sensors\\\\temperature -I comms chassis\\\\nav\\\\navigation.c)",
+      "PowerShell(gcc --version)",
+      "PowerShell(gcc -fsyntax-only -I constants -I \"chassis\\\\nav\" -I chassis -I comms -I \"sensors\" -I \"sensors\\\\distance\" -I \"sensors\\\\color\" -I \"sensors\\\\temperature\" \"chassis\\\\nav\\\\navigation.c\")",
+      "PowerShell($dirs = Get-ChildItem -Recurse -Directory | ForEach-Object { \"-I`\"$\\($_.FullName\\)`\"\" }; $cmd = \"gcc -fsyntax-only $\\($dirs -join ' '\\) -I. `\"chassis\\\\nav\\\\navigation.c`\"\"; Invoke-Expression $cmd)",
+      "PowerShell(gcc -fsyntax-only -Iconstants -Ichassis\\\\odom -Ichassis\\\\drive -Ichassis\\\\nav -Icomms -Isensors -Isensors\\\\distance -Isensors\\\\color -Isensors\\\\temperature chassis\\\\nav\\\\navigation.c)",
+      "PowerShell(gcc -fsyntax-only -I. -Iconstants -Ichassis\\\\odom -Ichassis\\\\drive -Ichassis\\\\nav -Icomms -Isensors -Isensors\\\\distance -Isensors\\\\color -Isensors\\\\temperature chassis\\\\nav\\\\navigation.c)"
+    ]
+  }
+}

@@ -74,6 +74,7 @@ static const char *cellStatusToString(cell_status_t status)
         case CELL_RESERVED: return "reserved";
         case CELL_EXPLORED: return "explored";
         case CELL_UNSAFE: return "unsafe";
+        case CELL_TAPE: return "tape";
         case CELL_HILL: return "hill";
         case CELL_SAMPLE: return "sample";
         default: return "unknown";
