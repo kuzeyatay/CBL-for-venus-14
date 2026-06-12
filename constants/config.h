@@ -113,6 +113,14 @@
 #define SAMPLE_AVOID_TURN_DEG 60.0f
 #define MAX_NAVIGATION_STEPS 80
 #define CELL_CENTER_REACHED_TOLERANCE_CM 2.0f
+/*
+ * Re-aim toward the target cell center between forward increments once the
+ * gyro-measured heading error exceeds this threshold.  Skipped within one
+ * increment of the target, where the bearing becomes ill-conditioned (a
+ * small lateral offset would command a large turn).  Must stay above
+ * GYRO_TURN_FINE_SKIP_DEG or turnToYaw() ignores the correction.
+ */
+#define MOVE_REAIM_THRESHOLD_DEG 2.0f
 
 /* Seconds to wait after a mission starts before the robot moves.
  * The robot stays still during this window and recalibrates the gyro bias. */

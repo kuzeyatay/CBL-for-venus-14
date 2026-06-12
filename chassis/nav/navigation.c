@@ -488,7 +488,7 @@ static bool estimateSampleSize(float width_cm, int *sample_size_cm)
         return true;
     }
 
-    if (width_cm >= 3.5f && width_cm <= 9.0f) {
+    if (width_cm >= 3.5f && width_cm <= 7.5f) {
         *sample_size_cm = 6;
         return true;
     }
@@ -1778,6 +1778,21 @@ static void moveToTargetCenter(void)
             sendPoseUpdate();
             transitionTo(NAV_STATE_MARK_CURRENT, "target cell center reached");
             return;
+        }
+
+        /* Gyro drift measured during previous increments shows up as a
+         * heading error relative to the bearing to the target; correct it
+         * here so the error cannot compound across increments. */
+        if (distance_cm > FORWARD_INCREMENT_CM) {
+            float bearing_deg = atan2f(delta_y, delta_x) * 180.0f / PI;
+            float heading_error_deg = shortestAngleDelta(bearing_deg, pose.yaw);
+
+            if (fabsf(heading_error_deg) > MOVE_REAIM_THRESHOLD_DEG) {
+                printf("MOVE TARGET CENTER re-aim: heading error %.2f deg, %.2f cm from target\n",
+                       heading_error_deg,
+                       distance_cm);
+                turnTowardPoint(target_x_cm, target_y_cm, DEFAULT_SPEED);
+            }
         }
 
         distance_window_t front_window =

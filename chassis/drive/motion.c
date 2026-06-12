@@ -13,6 +13,7 @@
 static float normalizeTurnCommand(float angle_deg);
 static int turnStepsForAngle(float angle_deg);
 static bool waitForStepperSteps(bool update_gyro);
+static void runStraightMove(float distance_cm, float speed_cm_s);
 static void turnOpenLoop(float angle_deg, float speed_cm_s);
 static void turnWithGyroFeedback(float angle_deg, float speed_cm_s);
 
@@ -97,38 +98,71 @@ static bool waitForStepperSteps(bool update_gyro)
     return gyro_ok;
 }
 
-void moveWithRamp(float distance_cm, float speed_cm_s)
+/*
+ * Straight move with gyro yaw tracking.
+ *
+ * The wheels are commanded equally, but slip and unequal wheel diameters
+ * still rotate the robot.  Integrating the gyro during the move measures
+ * that drift so the pose stays honest: the measured yaw change is split
+ * around the translation (midpoint integration) so the distance is
+ * projected along the average heading of the move.
+ */
+static void runStraightMove(float distance_cm, float speed_cm_s)
 {
     int steps = round(distance_cm * STEPS_PER_CM);
-
     int stepper_speed = speedFromCmPerSec(speed_cm_s);
+    bool track_yaw = false;
+    float yaw_change_deg = 0.0f;
+
+#if GYRO_TURN_ENABLED
+    track_yaw = !USE_MOCK_SENSORS &&
+                gyro_turn_feedback_enabled &&
+                isMPU6886Initialized();
+#endif
+
+    if (track_yaw) {
+        resetMPU6886Yaw();
+
+        if (!updateMPU6886Yaw()) {
+            printf("MOVE failed to prime gyro; yaw drift untracked for %.2f cm move\n",
+                   distance_cm);
+            track_yaw = false;
+        }
+    }
+
     stepper_set_speed(stepper_speed, stepper_speed);
     stepper_steps(steps, steps);
 
-    while (!stepper_steps_done())
-    {
-        // wait
+    if (!waitForStepperSteps(track_yaw) && track_yaw) {
+        printf("MOVE gyro read failure mid-move; drift estimate may be partial\n");
     }
 
     sleep_msec(500);
+
+    if (track_yaw) {
+        (void)updateMPU6886Yaw();
+        yaw_change_deg = getMPU6886YawDeg();
+
+        if (fabsf(yaw_change_deg) > GYRO_TURN_TOLERANCE_DEG) {
+            printf("MOVE drift: yaw changed %.2f deg over %.2f cm move\n",
+                   yaw_change_deg,
+                   distance_cm);
+        }
+    }
+
+    updatePoseAfterTurn(yaw_change_deg * 0.5f);
     updatePoseAfterMove(distance_cm);
+    updatePoseAfterTurn(yaw_change_deg * 0.5f);
+}
+
+void moveWithRamp(float distance_cm, float speed_cm_s)
+{
+    runStraightMove(distance_cm, speed_cm_s);
 }
 
 void move(float distance_cm, float speed_cm_s)
 {
-    int steps = round(distance_cm * STEPS_PER_CM);
-
-    int stepper_speed = speedFromCmPerSec(speed_cm_s);
-    stepper_set_speed(stepper_speed, stepper_speed);
-    stepper_steps(steps, steps);
-
-    while (!stepper_steps_done())
-    {
-        // wait
-    }
-
-    sleep_msec(500);
-    updatePoseAfterMove(distance_cm);
+    runStraightMove(distance_cm, speed_cm_s);
 }
 
 void turn(float angle_deg, float speed_cm_s)
