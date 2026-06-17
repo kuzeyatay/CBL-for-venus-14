@@ -287,15 +287,31 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
     while (measured_abs_deg < target_abs_deg - GYRO_TURN_TOLERANCE_DEG &&
            iteration < GYRO_TURN_MAX_ITERATIONS) {
         float remaining_deg = target_abs_deg - measured_abs_deg;
-        float chunk_deg = remaining_deg;
+        float chunk_deg;
         int steps = 0;
 
-        if (chunk_deg > GYRO_TURN_MAX_CHUNK_DEG) {
-            chunk_deg = GYRO_TURN_MAX_CHUNK_DEG;
-        }
+        if (remaining_deg > GYRO_TURN_FINE_APPROACH_DEG) {
+            /* Coarse phase: cover the bulk in one large continuous sweep,
+             * stopping short of the target by the fine margin so the
+             * closed-loop fine phase below never has to reverse.  Fewer
+             * start/stops make the motion much smoother; each chunk is still
+             * re-measured after settling, so accuracy is unchanged. */
+            chunk_deg = remaining_deg - GYRO_TURN_FINE_APPROACH_DEG;
 
-        if (chunk_deg < GYRO_TURN_MIN_CHUNK_DEG) {
-            chunk_deg = GYRO_TURN_MIN_CHUNK_DEG;
+            if (chunk_deg > GYRO_TURN_COARSE_MAX_CHUNK_DEG) {
+                chunk_deg = GYRO_TURN_COARSE_MAX_CHUNK_DEG;
+            }
+        } else {
+            /* Fine phase: small chunks for an accurate finish. */
+            chunk_deg = remaining_deg;
+
+            if (chunk_deg > GYRO_TURN_MAX_CHUNK_DEG) {
+                chunk_deg = GYRO_TURN_MAX_CHUNK_DEG;
+            }
+
+            if (chunk_deg < GYRO_TURN_MIN_CHUNK_DEG) {
+                chunk_deg = GYRO_TURN_MIN_CHUNK_DEG;
+            }
         }
 
         steps = turnStepsForAngle(chunk_deg);
@@ -306,6 +322,13 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
             measured_abs_deg += chunk_deg;
             break;
         }
+
+        /* Let the chunk's rotation fully register before deciding whether the
+         * turn is done.  Reading the instant the steppers stop under-counts
+         * the chunk (mechanical coast + gyro DLPF lag), which makes the loop
+         * over-drive and then overshoot when the final settle dumps the
+         * accumulated lag. */
+        settleWithGyroTracking(GYRO_TURN_CHUNK_SETTLE_MS, true);
 
         measured_abs_deg = fabsf(getMPU6886YawDeg());
 

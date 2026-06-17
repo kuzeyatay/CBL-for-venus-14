@@ -143,6 +143,7 @@ static void turnTowardPoint(float target_x_cm, float target_y_cm, float speed_cm
 static void returnToPoseApprox(pose_t saved_pose);
 static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg);
 static approach_result_t moveToDistanceFromObject(int target_distance_mm);
+static approach_result_t approachForWidthScan(void);
 static void finalizeRockSampleAtCloseRange(field_event_t *event);
 static void reportFieldEvent(field_event_t event);
 static void markHillBlockAroundCell(grid_cell_t center_cell);
@@ -1092,6 +1093,33 @@ static approach_result_t moveToDistanceFromObject(int target_distance_mm)
     return APPROACH_NOT_CONVERGED;
 }
 
+/*
+ * Approach to the width-classification distance, but skip the reverse when
+ * the object is already at or nearer than it.  The robot often halts closer
+ * than INVESTIGATE_APPROACH_DISTANCE_MM (especially when an object stops a
+ * move), and reversing to exactly that distance only to drive forward again
+ * for the color read produced a visible back-forward-back.  Discrimination
+ * still holds at closer range: a hill fills the whole width sweep (no sharp
+ * edge -> hill) while a small cube shows sharp edges within it (-> sample),
+ * so scanning in place is safe down to WIDTH_SCAN_MIN_IN_PLACE_MM.  Below
+ * that the object is too close for a clean sweep, so fall back to the
+ * closed-loop approach (which reverses to a safe distance).
+ */
+static approach_result_t approachForWidthScan(void)
+{
+    int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
+
+    if (isUsableDistance(distance_mm) &&
+        distance_mm <= INVESTIGATE_APPROACH_DISTANCE_MM &&
+        distance_mm >= WIDTH_SCAN_MIN_IN_PLACE_MM) {
+        printf("Width scan in place at %d mm (target %d mm) — back-up skipped\n",
+               distance_mm, INVESTIGATE_APPROACH_DISTANCE_MM);
+        return APPROACH_OK;
+    }
+
+    return moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+}
+
 static void finalizeRockSampleAtCloseRange(field_event_t *event)
 {
     bool at_color_distance =
@@ -1640,7 +1668,7 @@ static field_event_type_t investigateObjectAt(grid_cell_t candidate_cell,
         return FIELD_CLEAR;
     }
 
-    if (moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM) ==
+    if (approachForWidthScan() ==
             APPROACH_PUSHING) {
         /* The object slid along in front of the robot during the approach.
          * A width measured while pressed against it is garbage — a shoved
@@ -1788,10 +1816,11 @@ static void handleMovementObject(grid_cell_t affected_cell,
     }
 
     /* The robot stops wherever the object first entered the front-object
-     * window, which is usually closer than the width-classification
-     * distance. Back up to it first, like the scan-360 investigation path,
-     * so the width scan geometry matches the tuned thresholds. */
-    if (moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM) ==
+     * window, usually closer than the width-classification distance.  The
+     * width scan runs in place there (discrimination still holds) and only
+     * reverses if the object is too close for a clean sweep — so a sample no
+     * longer backs up just to drive forward again for the color read. */
+    if (approachForWidthScan() ==
             APPROACH_PUSHING) {
         sendNavLog("WARN", "Object at (%d,%d) pushed during approach — not classified",
                    affected_cell.x, affected_cell.y);
@@ -2099,7 +2128,7 @@ static void moveToTargetCenter(void)
             step_cm = FORWARD_INCREMENT_CM;
         }
 
-        moveWithRamp(step_cm, DEFAULT_SPEED);
+        moveWithRamp(step_cm, SAMPLE_APPROACH_SPEED_CM_S);
         total_moved_cm += step_cm;
         sendPoseUpdate();
         pollESP32Messages();

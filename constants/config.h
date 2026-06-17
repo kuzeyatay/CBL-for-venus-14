@@ -68,13 +68,35 @@
  * (including straight-move drift compensation).  Copy the calibration output
  * including its sign.
  */
-#define GYRO_Z_SCALE_CORRECTION 1.165f
+#define GYRO_Z_SCALE_CORRECTION -0.9762f
 #define GYRO_TURN_TOLERANCE_DEG 0.5f
 #define GYRO_TURN_FINE_SKIP_DEG 1.0f
 #define GYRO_TURN_MAX_CHUNK_DEG 5.0f
 #define GYRO_TURN_MIN_CHUNK_DEG 0.6f
+/*
+ * Coarse/fine turn approach.  A turn sweeps its bulk in large continuous
+ * "coarse" chunks (up to GYRO_TURN_COARSE_MAX_CHUNK_DEG), which makes the
+ * motion much smoother than many small GYRO_TURN_MAX_CHUNK_DEG chunks — a
+ * 90-degree turn becomes a few long sweeps instead of ~18 stutter steps.
+ * The coarse phase always stops GYRO_TURN_FINE_APPROACH_DEG short of the
+ * target, then the unchanged small-chunk fine phase finishes the last few
+ * degrees with closed-loop accuracy, so the coarse phase never has to
+ * reverse and turn precision is unaffected.
+ */
+#define GYRO_TURN_COARSE_MAX_CHUNK_DEG 20.0f
+#define GYRO_TURN_FINE_APPROACH_DEG 5.0f
 #define GYRO_TURN_UPDATE_INTERVAL_MS 2
 #define GYRO_TURN_SETTLE_MS 100
+/*
+ * Per-chunk settle inside the feedback loop.  When the steppers report a
+ * chunk done the robot is still coasting and the gyro's DLPF output still
+ * lags, so reading the yaw immediately under-counts the chunk.  That makes
+ * the loop command extra chunks and then dump the accumulated lag in the
+ * final settle as overshoot.  A short tracked settle after each chunk lets
+ * the rotation register before the loop's exit decision, so it stops at the
+ * right angle instead of over-driving.
+ */
+#define GYRO_TURN_CHUNK_SETTLE_MS 40
 #define GYRO_TURN_MAX_ITERATIONS 120
 #define GYRO_TURN_MAX_STALE_CHUNKS 5
 /*
@@ -233,6 +255,14 @@
  * misclassified as rock samples. Color reading happens later at the closer
  * SAMPLE_COLOR_DISTANCE_MM once a rock is confirmed. */
 #define INVESTIGATE_APPROACH_DISTANCE_MM 120
+/* When an object is already at or nearer than the width-classification
+ * distance, the width scan runs in place instead of reversing to exactly
+ * INVESTIGATE_APPROACH_DISTANCE_MM (which only produced a back-forward-back
+ * before the color read).  This floor is the closest the scan still gets a
+ * clean sweep; below it the closed-loop approach reverses to a safe distance.
+ * Discrimination holds at close range — a hill fills the whole sweep, a small
+ * cube shows sharp edges within it. */
+#define WIDTH_SCAN_MIN_IN_PLACE_MM 70
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 /* Per-attempt move cap: one overestimated VL53L0X reading (sloped/dark hill
  * face) must not be able to drive the robot into the object.  8 cm bounds the
@@ -245,7 +275,10 @@
  * more than the background margin mean the beam slipped off the object and
  * are ignored instead of being driven toward. */
 #define SAMPLE_APPROACH_MAX_ATTEMPTS 6
-#define SAMPLE_APPROACH_READINGS 3
+/* Median distance samples per approach step.  More samples steady the noisy
+ * VL53L0X return off a small cube (its beam is wider than a 3 cm face), so the
+ * closed loop stops correcting back and forth on every reading. */
+#define SAMPLE_APPROACH_READINGS 5
 #define SAMPLE_APPROACH_BACKGROUND_MARGIN_MM 50
 
 /* Push detection inside the closed-loop approach: a forward correction of at
