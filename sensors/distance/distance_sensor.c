@@ -541,14 +541,20 @@ static float scanOneObjectEdge(int direction, int center_distance_mm,
                distance_mm);
 
         if (!scanStillSeesObject(distance_mm, center_distance_mm)) {
-            /* Sharp edge: the beam fell off the object onto the background
-             * (invalid reading or a large jump) — a real free-standing edge.
-             * Soft edge: the reading is still near the center distance, so
-             * the margin tripped on the gradual slope of a large oblique
-             * face whose surface continues past this angle. */
+            /* Sharp edge (free-standing object): the beam fell off onto the
+             * background (invalid or a large jump), OR the object was lost at
+             * a small angle.  A large face only drifts past the margin after
+             * tens of degrees of rotation (distance grows as ~D*theta^2/2), so
+             * losing the object within WIDTH_SCAN_SHARP_MAX_EDGE_DEG means a
+             * bounded small object whose edge merely blended with the
+             * background for one reading — not a hill slope.
+             * Soft edge (hill): the margin tripped at a large angle while the
+             * reading stayed near center, i.e. the surface continues past
+             * here. */
             *edge_is_sharp =
                 !isDistanceReadingValidForScan(distance_mm) ||
-                distance_mm > center_distance_mm + WIDTH_SCAN_BACKGROUND_JUMP_MM;
+                distance_mm > center_distance_mm + WIDTH_SCAN_BACKGROUND_JUMP_MM ||
+                current_angle <= WIDTH_SCAN_SHARP_MAX_EDGE_DEG;
             return (last_visible_angle + current_angle) / 2.0;
         }
 

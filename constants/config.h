@@ -229,6 +229,13 @@
  * is the gradual slope of a large face seen obliquely (a hill), whose
  * surface continues beyond the detected angle. */
 #define WIDTH_SCAN_BACKGROUND_JUMP_MM 150
+/* An object lost at or below this rotation angle is a bounded small object
+ * (rock sample), not a hill: a large face does not drift past
+ * WIDTH_SCAN_DISTANCE_MARGIN_MM until tens of degrees of rotation, so a loss
+ * this early is a cube edge whose blended reading happened to fall between the
+ * margin and the background jump.  Without this, a small cube's blended edge
+ * reads as a "soft" edge and gets clamped to hill size. */
+#define WIDTH_SCAN_SHARP_MAX_EDGE_DEG 30.0f
 
 #define VL53L0X_INVALID_DISTANCE_MM -1
 #define VL53L0X_MAX_REASONABLE_MM 2000
@@ -248,21 +255,26 @@
 #define UART_PAYLOAD_MAX_SIZE 256
 
 /* Sample approach and post-move scan constants */
-#define SAMPLE_COLOR_DISTANCE_MM 68
+#define SAMPLE_COLOR_DISTANCE_MM 73
 /* Width-classification distance: must be far enough that a 30 cm hill's edge
  * (atan(15/12)=51 deg at 120 mm) falls inside WIDTH_SCAN_MAX_DEG, otherwise the
  * geometry collapses at close range and hills measure a tiny width and get
  * misclassified as rock samples. Color reading happens later at the closer
  * SAMPLE_COLOR_DISTANCE_MM once a rock is confirmed. */
 #define INVESTIGATE_APPROACH_DISTANCE_MM 120
-/* When an object is already at or nearer than the width-classification
- * distance, the width scan runs in place instead of reversing to exactly
- * INVESTIGATE_APPROACH_DISTANCE_MM (which only produced a back-forward-back
- * before the color read).  This floor is the closest the scan still gets a
- * clean sweep; below it the closed-loop approach reverses to a safe distance.
- * Discrimination holds at close range — a hill fills the whole sweep, a small
- * cube shows sharp edges within it. */
+/* The width scan runs in place whenever the object already sits in a workable
+ * sweep range [WIDTH_SCAN_MIN_IN_PLACE_MM, WIDTH_SCAN_MAX_IN_PLACE_MM] instead
+ * of first running a precise closed-loop approach to
+ * INVESTIGATE_APPROACH_DISTANCE_MM.  That approach oscillates endlessly on a
+ * small cube — its narrow VL53L0X return is bimodal (locks onto the cube or
+ * slips to the background), so the robot chases it forward and back — and it
+ * is unnecessary: discrimination holds across the whole band (a hill fills the
+ * sweep, a cube shows sharp edges within it).  Only move when the object is
+ * too close for a clean sweep or too far to resolve.  Staying put also avoids
+ * triggering the bimodal split in the first place: a stationary robot reads
+ * the object's distance steadily. */
 #define WIDTH_SCAN_MIN_IN_PLACE_MM 70
+#define WIDTH_SCAN_MAX_IN_PLACE_MM 250
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 /* Per-attempt move cap: one overestimated VL53L0X reading (sloped/dark hill
  * face) must not be able to drive the robot into the object.  8 cm bounds the

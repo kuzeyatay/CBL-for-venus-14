@@ -923,14 +923,14 @@ static void returnToPoseApprox(pose_t saved_pose)
             printf("RETURN CELL CENTER reverse: distance=%.2f cm, alignment_error=%.2f deg\n",
                    distance_cm,
                    reverse_alignment_error);
-            moveWithRamp(-distance_cm, DEFAULT_SPEED);
+            moveWithRamp(-distance_cm, SAMPLE_APPROACH_SPEED_CM_S);
             sendPoseUpdate();
         } else {
             printf("RETURN CELL CENTER forward: distance=%.2f cm, alignment_error=%.2f deg\n",
                    distance_cm,
                    reverse_alignment_error);
             turnTowardPoint(saved_pose.x, saved_pose.y, DEFAULT_SPEED);
-            moveWithRamp(distance_cm, DEFAULT_SPEED);
+            moveWithRamp(distance_cm, SAMPLE_APPROACH_SPEED_CM_S);
             sendPoseUpdate();
         }
     }
@@ -970,7 +970,7 @@ static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg)
                    cell.x,
                    cell.y,
                    reverse_alignment_error);
-            moveWithRamp(-distance_cm, DEFAULT_SPEED);
+            moveWithRamp(-distance_cm, SAMPLE_APPROACH_SPEED_CM_S);
             sendPoseUpdate();
         } else {
             printf("REVERSE CELL CENTER fallback: alignment_error=%.2f deg, using point return\n",
@@ -1107,13 +1107,23 @@ static approach_result_t moveToDistanceFromObject(int target_distance_mm)
  */
 static approach_result_t approachForWidthScan(void)
 {
-    int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
+    /* Use the closest in-window reading: a small cube's narrow VL53L0X return
+     * is bimodal (some readings lock onto the cube, others slip past it to the
+     * background), and the close mode is the object we want to scan. */
+    distance_window_t window = readDistanceWindow(SAMPLE_APPROACH_READINGS);
+    int distance_mm = window.best_close_distance_mm;
 
+    /* Scan from wherever the object already sits when that is a workable
+     * width-scan distance.  A precise closed-loop approach to a single target
+     * oscillates endlessly on a small cube (the bimodal return makes the robot
+     * chase it forward and back) and is unnecessary — discrimination holds
+     * across the whole band.  Only move when the object is too close for a
+     * clean sweep or too far to resolve. */
     if (isUsableDistance(distance_mm) &&
-        distance_mm <= INVESTIGATE_APPROACH_DISTANCE_MM &&
-        distance_mm >= WIDTH_SCAN_MIN_IN_PLACE_MM) {
-        printf("Width scan in place at %d mm (target %d mm) — back-up skipped\n",
-               distance_mm, INVESTIGATE_APPROACH_DISTANCE_MM);
+        distance_mm >= WIDTH_SCAN_MIN_IN_PLACE_MM &&
+        distance_mm <= WIDTH_SCAN_MAX_IN_PLACE_MM) {
+        printf("Width scan in place at %d mm — closed-loop approach skipped\n",
+               distance_mm);
         return APPROACH_OK;
     }
 
@@ -1122,8 +1132,37 @@ static approach_result_t approachForWidthScan(void)
 
 static void finalizeRockSampleAtCloseRange(field_event_t *event)
 {
-    bool at_color_distance =
-        moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM) == APPROACH_OK;
+    /* Single-shot approach to the color-read distance.  A closed loop here
+     * oscillates pointlessly on a small cube (the bimodal VL53L0X return makes
+     * each correction chase the object forward and back); the TCS3200 color
+     * read tolerates a few mm of error, so one move from a median distance
+     * reading is enough. */
+    int color_distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
+    bool at_color_distance = false;
+
+    if (isUsableDistance(color_distance_mm) &&
+        color_distance_mm <= FRONT_OBJECT_MAX_DISTANCE_MM +
+                                 SAMPLE_APPROACH_BACKGROUND_MARGIN_MM) {
+        float move_cm =
+            (float)(color_distance_mm - SAMPLE_COLOR_DISTANCE_MM) / 10.0f;
+
+        if (move_cm > SAMPLE_APPROACH_MAX_CM) {
+            move_cm = SAMPLE_APPROACH_MAX_CM;
+        }
+
+        if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
+            move_cm = -SAMPLE_APPROACH_MAX_CM;
+        }
+
+        printf("Color approach single move %.2f cm to reach %d mm (from %d mm)\n",
+               move_cm, SAMPLE_COLOR_DISTANCE_MM, color_distance_mm);
+        moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
+        sendPoseUpdate();
+        at_color_distance = true;
+    } else {
+        printf("Color approach skipped: no usable distance reading (%d mm)\n",
+               color_distance_mm);
+    }
 
     event->distance_mm = readVL53L0XDistance();
 
