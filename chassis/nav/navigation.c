@@ -142,7 +142,7 @@ static void turnToYaw(float target_yaw_deg, float speed_cm_s);
 static void turnTowardPoint(float target_x_cm, float target_y_cm, float speed_cm_s);
 static void returnToPoseApprox(pose_t saved_pose);
 static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg);
-static approach_result_t moveToDistanceFromObject(int target_distance_mm);
+static bool moveToDistanceSingleShot(int target_distance_mm);
 static approach_result_t approachForWidthScan(void);
 static void finalizeRockSampleAtCloseRange(field_event_t *event);
 static void reportFieldEvent(field_event_t event);
@@ -986,111 +986,44 @@ static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg)
 }
 
 /*
- * Closed-loop positioning at a sensing distance from the object in front.
- * Width classification is only valid at INVESTIGATE_APPROACH_DISTANCE_MM and
- * the color read at SAMPLE_COLOR_DISTANCE_MM, so the robot must actually
- * reach the requested distance: read, correct, re-read until within
- * tolerance instead of trusting one reading and one open-loop move.
- * Returns APPROACH_OK when the final verified distance is within tolerance,
- * APPROACH_PUSHING when forward motion stops shrinking the measured distance
- * (the object is sliding along in front of the robot — stop before shoving
- * it further), and APPROACH_NOT_CONVERGED otherwise.
+ * Single move to a standoff distance from the object in front, based on one
+ * median distance reading.  A closed loop oscillates pointlessly on a small
+ * cube — its narrow VL53L0X return is bimodal (locks onto the cube or slips to
+ * the background), so each correction chases the object forward and back.  A
+ * few mm of error is fine for both the width standoff and the color read, so
+ * one move from a median reading is enough; backing out from too-close lands
+ * in one reverse instead of the go-front-go-back dance.  Returns true when a
+ * usable reading was found and the move was made.
  */
-static approach_result_t moveToDistanceFromObject(int target_distance_mm)
+static bool moveToDistanceSingleShot(int target_distance_mm)
 {
-    int last_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
-    int previous_reading_mm = VL53L0X_INVALID_DISTANCE_MM;
-    float net_forward_since_reading_cm = 0.0f;
-    int push_strike_count = 0;
+    int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
 
-    for (int attempt = 1; attempt <= SAMPLE_APPROACH_MAX_ATTEMPTS; attempt++) {
-        int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
-
-        if (!isUsableDistance(distance_mm)) {
-            printf("Sample approach %d/%d: invalid distance reading\n",
-                   attempt, SAMPLE_APPROACH_MAX_ATTEMPTS);
-            continue;
-        }
-
-        /* Approaches only start with the object inside the front-object
-         * window. A reading far beyond it means the beam slipped off the
-         * object onto the background; moving toward it would ram the object. */
-        if (distance_mm > FRONT_OBJECT_MAX_DISTANCE_MM +
-                              SAMPLE_APPROACH_BACKGROUND_MARGIN_MM) {
-            printf("Sample approach %d/%d: background reading %d mm ignored\n",
-                   attempt, SAMPLE_APPROACH_MAX_ATTEMPTS, distance_mm);
-            continue;
-        }
-
-        /* Push detection: driving forward must shrink the reading by roughly
-         * the distance driven.  An object sliding in front of the robot keeps
-         * the reading nearly constant while the robot advances. */
-        if (previous_reading_mm != VL53L0X_INVALID_DISTANCE_MM &&
-            net_forward_since_reading_cm >= APPROACH_PUSH_MIN_FORWARD_CM) {
-            int expected_drop_mm = (int)(net_forward_since_reading_cm * 10.0f);
-            int actual_drop_mm = previous_reading_mm - distance_mm;
-
-            if (actual_drop_mm * 2 < expected_drop_mm) {
-                push_strike_count++;
-                printf("Sample approach push strike %d/%d: moved %.1f cm, distance %d -> %d mm\n",
-                       push_strike_count,
-                       APPROACH_PUSH_MAX_STRIKES,
-                       net_forward_since_reading_cm,
-                       previous_reading_mm,
-                       distance_mm);
-
-                if (push_strike_count >= APPROACH_PUSH_MAX_STRIKES) {
-                    sendNavLog("WARN", "Approach aborted at %dmm — object sliding (pushed)",
-                               distance_mm);
-                    return APPROACH_PUSHING;
-                }
-            } else {
-                push_strike_count = 0;
-            }
-        }
-
-        previous_reading_mm = distance_mm;
-        net_forward_since_reading_cm = 0.0f;
-        last_distance_mm = distance_mm;
-
-        int error_mm = distance_mm - target_distance_mm;
-        int abs_error_mm = error_mm < 0 ? -error_mm : error_mm;
-
-        if (abs_error_mm <= SAMPLE_APPROACH_TOLERANCE_MM) {
-            printf("Sample approach done: %d mm (target %d mm)\n",
-                   distance_mm, target_distance_mm);
-            return APPROACH_OK;
-        }
-
-        if (attempt == SAMPLE_APPROACH_MAX_ATTEMPTS) {
-            break;
-        }
-
-        float move_cm = (float)error_mm / 10.0f;
-
-        if (move_cm > SAMPLE_APPROACH_MAX_CM) {
-            move_cm = SAMPLE_APPROACH_MAX_CM;
-        }
-
-        if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
-            move_cm = -SAMPLE_APPROACH_MAX_CM;
-        }
-
-        printf("Sample approach %d/%d: moving %.2f cm to reach %d mm, current %d mm\n",
-               attempt,
-               SAMPLE_APPROACH_MAX_ATTEMPTS,
-               move_cm,
-               target_distance_mm,
+    /* A reading far past the front-object window means the beam slipped onto
+     * the background; moving toward it would ram the object. */
+    if (!isUsableDistance(distance_mm) ||
+        distance_mm > FRONT_OBJECT_MAX_DISTANCE_MM +
+                          SAMPLE_APPROACH_BACKGROUND_MARGIN_MM) {
+        printf("Single-shot approach skipped: unusable distance (%d mm)\n",
                distance_mm);
-
-        moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
-        net_forward_since_reading_cm += move_cm;
-        sendPoseUpdate();
+        return false;
     }
 
-    sendNavLog("WARN", "Approach to %dmm did not converge (last reading %dmm)",
-               target_distance_mm, last_distance_mm);
-    return APPROACH_NOT_CONVERGED;
+    float move_cm = (float)(distance_mm - target_distance_mm) / 10.0f;
+
+    if (move_cm > SAMPLE_APPROACH_MAX_CM) {
+        move_cm = SAMPLE_APPROACH_MAX_CM;
+    }
+
+    if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
+        move_cm = -SAMPLE_APPROACH_MAX_CM;
+    }
+
+    printf("Single-shot approach %.2f cm to reach %d mm (from %d mm)\n",
+           move_cm, target_distance_mm, distance_mm);
+    moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
+    sendPoseUpdate();
+    return true;
 }
 
 /*
@@ -1102,8 +1035,8 @@ static approach_result_t moveToDistanceFromObject(int target_distance_mm)
  * still holds at closer range: a hill fills the whole width sweep (no sharp
  * edge -> hill) while a small cube shows sharp edges within it (-> sample),
  * so scanning in place is safe down to WIDTH_SCAN_MIN_IN_PLACE_MM.  Below
- * that the object is too close for a clean sweep, so fall back to the
- * closed-loop approach (which reverses to a safe distance).
+ * that the object is too close for a clean sweep, so back out with a single
+ * move to a safe distance.
  */
 static approach_result_t approachForWidthScan(void)
 {
@@ -1122,47 +1055,24 @@ static approach_result_t approachForWidthScan(void)
     if (isUsableDistance(distance_mm) &&
         distance_mm >= WIDTH_SCAN_MIN_IN_PLACE_MM &&
         distance_mm <= WIDTH_SCAN_MAX_IN_PLACE_MM) {
-        printf("Width scan in place at %d mm — closed-loop approach skipped\n",
+        printf("Width scan in place at %d mm — approach skipped\n",
                distance_mm);
         return APPROACH_OK;
     }
 
-    return moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+    /* Too close (or too far) for a clean sweep: one move to the standoff
+     * distance, no closed loop, so a too-close object backs out in a single
+     * reverse instead of the go-front-go-back dance. */
+    moveToDistanceSingleShot(INVESTIGATE_APPROACH_DISTANCE_MM);
+    return APPROACH_OK;
 }
 
 static void finalizeRockSampleAtCloseRange(field_event_t *event)
 {
-    /* Single-shot approach to the color-read distance.  A closed loop here
-     * oscillates pointlessly on a small cube (the bimodal VL53L0X return makes
-     * each correction chase the object forward and back); the TCS3200 color
-     * read tolerates a few mm of error, so one move from a median distance
-     * reading is enough. */
-    int color_distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
-    bool at_color_distance = false;
-
-    if (isUsableDistance(color_distance_mm) &&
-        color_distance_mm <= FRONT_OBJECT_MAX_DISTANCE_MM +
-                                 SAMPLE_APPROACH_BACKGROUND_MARGIN_MM) {
-        float move_cm =
-            (float)(color_distance_mm - SAMPLE_COLOR_DISTANCE_MM) / 10.0f;
-
-        if (move_cm > SAMPLE_APPROACH_MAX_CM) {
-            move_cm = SAMPLE_APPROACH_MAX_CM;
-        }
-
-        if (move_cm < -SAMPLE_APPROACH_MAX_CM) {
-            move_cm = -SAMPLE_APPROACH_MAX_CM;
-        }
-
-        printf("Color approach single move %.2f cm to reach %d mm (from %d mm)\n",
-               move_cm, SAMPLE_COLOR_DISTANCE_MM, color_distance_mm);
-        moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
-        sendPoseUpdate();
-        at_color_distance = true;
-    } else {
-        printf("Color approach skipped: no usable distance reading (%d mm)\n",
-               color_distance_mm);
-    }
+    /* Single move to the color-read distance — see moveToDistanceSingleShot:
+     * a closed loop oscillates on a small cube for no benefit, and the TCS3200
+     * read tolerates a few mm of error. */
+    bool at_color_distance = moveToDistanceSingleShot(SAMPLE_COLOR_DISTANCE_MM);
 
     event->distance_mm = readVL53L0XDistance();
 

@@ -109,10 +109,10 @@
  * GYRO_SMALL_TURN_THRESHOLD_DEG slows the motion to give the gyro many
  * samples per degree.
  *
- * The threshold is kept ABOVE SCAN_360_STEP_DEG (15) so every step of the
+ * The threshold is kept ABOVE SCAN_360_STEP_DEG (10) so every step of the
  * 360 scan turns slowly.  The scan sweep is the dominant source of
- * accumulated heading drift, and a fast 15-degree step is exactly where
- * the gyro mis-integrates (requested 15 deg measured as ~20 deg in tests).
+ * accumulated heading drift, and a fast scan step is exactly where the gyro
+ * mis-integrates (a 15-degree step once measured as ~20 deg in tests).
  */
 #define GYRO_SMALL_TURN_THRESHOLD_DEG  20.0f
 #define GYRO_SMALL_TURN_MAX_SPEED_CM_S  3.0f
@@ -172,7 +172,7 @@
  * inside the black-tape boundary.  The map is intentionally larger than a
  * 4x6 A4 test field; navigation should discover boundaries from tape.
  */
-#define SCAN_360_STEP_DEG 15.0f
+#define SCAN_360_STEP_DEG 10.0f
 #define SCAN_DISTANCE_READINGS_PER_ANGLE 4
 #define SCAN_ANGLE_OBJECT_MIN_CLOSE_READINGS 2
 #define SCAN_CLEAR_MIN_READINGS 1
@@ -255,7 +255,7 @@
 #define UART_PAYLOAD_MAX_SIZE 256
 
 /* Sample approach and post-move scan constants */
-#define SAMPLE_COLOR_DISTANCE_MM 73
+#define SAMPLE_COLOR_DISTANCE_MM 69
 /* Width-classification distance: must be far enough that a 30 cm hill's edge
  * (atan(15/12)=51 deg at 120 mm) falls inside WIDTH_SCAN_MAX_DEG, otherwise the
  * geometry collapses at close range and hills measure a tiny width and get
