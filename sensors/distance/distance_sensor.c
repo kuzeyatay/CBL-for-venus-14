@@ -517,11 +517,13 @@ static bool scanStillSeesObject(int distance_mm, int center_distance_mm) {
     return true;
 }
 
-static float scanOneObjectEdge(int direction, int center_distance_mm, float *total_turned_deg) {
+static float scanOneObjectEdge(int direction, int center_distance_mm,
+                               float *total_turned_deg, bool *edge_is_sharp) {
     float last_visible_angle = 0.0;
     float current_angle = 0.0;
 
     *total_turned_deg = 0.0;
+    *edge_is_sharp = true;
 
     while (current_angle < WIDTH_SCAN_MAX_DEG) {
         turn(direction * WIDTH_SCAN_STEP_DEG, WIDTH_SCAN_TURN_SPEED);
@@ -539,12 +541,22 @@ static float scanOneObjectEdge(int direction, int center_distance_mm, float *tot
                distance_mm);
 
         if (!scanStillSeesObject(distance_mm, center_distance_mm)) {
+            /* Sharp edge: the beam fell off the object onto the background
+             * (invalid reading or a large jump) — a real free-standing edge.
+             * Soft edge: the reading is still near the center distance, so
+             * the margin tripped on the gradual slope of a large oblique
+             * face whose surface continues past this angle. */
+            *edge_is_sharp =
+                !isDistanceReadingValidForScan(distance_mm) ||
+                distance_mm > center_distance_mm + WIDTH_SCAN_BACKGROUND_JUMP_MM;
             return (last_visible_angle + current_angle) / 2.0;
         }
 
         last_visible_angle = current_angle;
     }
 
+    /* Object filled the whole sweep — certainly not a small sample. */
+    *edge_is_sharp = false;
     return WIDTH_SCAN_MAX_DEG;
 }
 
@@ -568,14 +580,18 @@ float scanObjectWidth(void) {
     printf("Width scan started. Center distance = %d mm\n", center_distance_mm);
 
     float left_total_turned = 0.0;
-    float left_edge_deg = scanOneObjectEdge(-1, center_distance_mm, &left_total_turned);
+    bool left_edge_sharp = true;
+    float left_edge_deg = scanOneObjectEdge(-1, center_distance_mm,
+                                            &left_total_turned, &left_edge_sharp);
 
     turn(left_total_turned, WIDTH_SCAN_TURN_SPEED);
 
     sleep_msec(150);
 
     float right_total_turned = 0.0;
-    float right_edge_deg = scanOneObjectEdge(+1, center_distance_mm, &right_total_turned);
+    bool right_edge_sharp = true;
+    float right_edge_deg = scanOneObjectEdge(+1, center_distance_mm,
+                                             &right_total_turned, &right_edge_sharp);
 
     turn(-right_total_turned, WIDTH_SCAN_TURN_SPEED);
 
@@ -592,12 +608,30 @@ float scanObjectWidth(void) {
     float angular_width_rad = degToRad(angular_width_deg);
     float width_cm = 2.0 * distance_cm * tan(angular_width_rad / 2.0);
 
+    /*
+     * A free-standing rock sample drops to the background past BOTH edges.
+     * A soft edge means the surface continues beyond the detected angle —
+     * the margin tripped on the slope of a large face seen obliquely, which
+     * is how a 30 cm hill measures 5 cm and turns into a phantom sample.
+     * Report hill-sized width so classification lands on hill.
+     */
+    if (!left_edge_sharp || !right_edge_sharp) {
+        printf("Width scan soft edge (left=%s, right=%s): large oblique face, width %.2f -> %.2f cm\n",
+               left_edge_sharp ? "sharp" : "soft",
+               right_edge_sharp ? "sharp" : "soft",
+               width_cm,
+               (double)HILL_PHYSICAL_SIZE_CM);
+
+        if (width_cm < HILL_PHYSICAL_SIZE_CM) {
+            width_cm = HILL_PHYSICAL_SIZE_CM;
+        }
+    }
+
     printf("Width scan result: left=%.2f deg, right=%.2f deg, total=%.2f deg, width=%.2f cm\n",
            left_edge_deg,
            right_edge_deg,
            angular_width_deg,
            width_cm);
 
-        
     return width_cm;
 }

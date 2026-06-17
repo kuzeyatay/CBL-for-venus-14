@@ -53,9 +53,20 @@
  * Gyro scale correction:
  *   correction = physical_turn_deg / gyro_reported_turn_deg
  *
- * 1.200 made the robot physically under-turn, while 1.100 made it physically
- * over-turn. 1.165 is a small increase from the midpoint to reduce the
- * remaining physical overshoot.
+ * This constant absorbs the sensor's sensitivity error AND the fixed
+ * mounting tilt (cos(tilt) scales every reading identically).
+ *
+ * STALE after the trapezoidal-integration change in gyro_sensor.c: the old
+ * 1.165 was hand-tuned against the rectangle integrator's losses.
+ * Re-measure with runGyroScaleCalibration() from main(), e.g.:
+ *   runGyroScaleCalibration(3, SCAN_360_STEP_DEG, DEFAULT_SPEED);
+ * and copy the printed value here.
+ *
+ * The value may legitimately be NEGATIVE: this robot's gyro is mounted with
+ * the Z axis inverted (positive turns read negative yaw), and the sign in
+ * this constant is what makes positive yaw mean counterclockwise everywhere
+ * (including straight-move drift compensation).  Copy the calibration output
+ * including its sign.
  */
 #define GYRO_Z_SCALE_CORRECTION 1.165f
 #define GYRO_TURN_TOLERANCE_DEG 0.5f
@@ -68,24 +79,32 @@
 #define GYRO_TURN_MAX_STALE_CHUNKS 5
 /*
  * Small-turn speed cap:
- * At normal navigation speed (~8 cm/s) a 1-3 degree turn takes only
- * 3-6 ms, leaving fewer than 3 gyro samples at 2 ms polling — the
- * integrator misses most of the rotation and the stale-chunk detector
- * exits early.  Capping speed to GYRO_SMALL_TURN_MAX_SPEED_CM_S for
- * turns shorter than GYRO_SMALL_TURN_THRESHOLD_DEG slows the motion
- * to ~28 ms/degree, giving the gyro ~14 samples per degree.
+ * At normal navigation speed a short turn takes only a few ms, leaving
+ * too few gyro samples at the polling rate — the integrator misses part
+ * of the rotation by an amount that varies with turn speed, which shows
+ * up as heading drift and under/over-rotation.  Capping speed to
+ * GYRO_SMALL_TURN_MAX_SPEED_CM_S for turns shorter than
+ * GYRO_SMALL_TURN_THRESHOLD_DEG slows the motion to give the gyro many
+ * samples per degree.
+ *
+ * The threshold is kept ABOVE SCAN_360_STEP_DEG (15) so every step of the
+ * 360 scan turns slowly.  The scan sweep is the dominant source of
+ * accumulated heading drift, and a fast 15-degree step is exactly where
+ * the gyro mis-integrates (requested 15 deg measured as ~20 deg in tests).
  */
-#define GYRO_SMALL_TURN_THRESHOLD_DEG  10.0f
+#define GYRO_SMALL_TURN_THRESHOLD_DEG  20.0f
 #define GYRO_SMALL_TURN_MAX_SPEED_CM_S  3.0f
 /*
  * Large-turn speed cap:
- * Turns >= 90 degrees put sustained load on the motor drivers.
- * Capping to GYRO_LARGE_TURN_MAX_SPEED_CM_S reduces stall risk.
- * If a stall is still detected mid-turn, one retry at the slow
- * small-turn speed is attempted before giving up.
+ * Bigger turns (navigation re-orientation, scan-arc skips) both load the
+ * motor drivers and accumulate the most heading error, so they are capped
+ * to GYRO_LARGE_TURN_MAX_SPEED_CM_S for smoother, more accurate rotation.
+ * The threshold sits below the 90-degree navigation turn so those run
+ * slowed too.  If a stall is still detected mid-turn, one retry at the
+ * slow small-turn speed is attempted before giving up.
  */
-#define GYRO_LARGE_TURN_THRESHOLD_DEG  90.0f
-#define GYRO_LARGE_TURN_MAX_SPEED_CM_S 10.0f
+#define GYRO_LARGE_TURN_THRESHOLD_DEG  45.0f
+#define GYRO_LARGE_TURN_MAX_SPEED_CM_S 8.0f
 
 /* 1 = scripted fake readings, 0 = real sensors. */
 #define USE_MOCK_SENSORS 0
@@ -153,6 +172,12 @@
 
 #define MOVE_DISTANCE_READINGS_PER_CHECK 4
 #define MOVE_OBJECT_MIN_CLOSE_READINGS 4
+/* An object seen during a move only blocks it when it is closer than the
+ * remaining travel plus this clearance (half robot length 11 cm + margin).
+ * Objects beyond that still leave a gap after the robot stops at the target
+ * center — e.g. a hill 20 cm past a backtrack cell must not strand the
+ * robot on the wrong side of the map. */
+#define MOVE_OBJECT_STOP_CLEARANCE_MM 150
 #define INVESTIGATE_DISTANCE_READINGS_PER_CONFIRMATION 4
 #define INVESTIGATE_OBJECT_MIN_CLOSE_READINGS 2
 
@@ -176,6 +201,12 @@
 #define WIDTH_SCAN_DISTANCE_MARGIN_MM 20
 #define MOVE_AFTER_SCAN_CM 5.5f
 #define WIDTH_SCAN_AVERAGE_COUNT 2
+/* Edge sharpness: a real free-standing edge (rock sample) drops to the
+ * background — the past-edge reading jumps by at least this much or goes
+ * invalid.  A reading that only drifted past WIDTH_SCAN_DISTANCE_MARGIN_MM
+ * is the gradual slope of a large face seen obliquely (a hill), whose
+ * surface continues beyond the detected angle. */
+#define WIDTH_SCAN_BACKGROUND_JUMP_MM 150
 
 #define VL53L0X_INVALID_DISTANCE_MM -1
 #define VL53L0X_MAX_REASONABLE_MM 2000
@@ -203,15 +234,35 @@
  * SAMPLE_COLOR_DISTANCE_MM once a rock is confirmed. */
 #define INVESTIGATE_APPROACH_DISTANCE_MM 120
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
-#define SAMPLE_APPROACH_MAX_CM 20.0f
+/* Per-attempt move cap: one overestimated VL53L0X reading (sloped/dark hill
+ * face) must not be able to drive the robot into the object.  8 cm bounds the
+ * damage of a single bad reading; the extra attempts below cover the worst
+ * legitimate case (object confirmed at 350 mm needs ~23 cm in 3 moves). */
+#define SAMPLE_APPROACH_MAX_CM 8.0f
 #define SAMPLE_APPROACH_SPEED_CM_S 5.0f
 /* Closed-loop approach: up to MAX_ATTEMPTS read-correct cycles, each reading
  * a median of READINGS samples. Readings beyond the front-object window by
  * more than the background margin mean the beam slipped off the object and
  * are ignored instead of being driven toward. */
-#define SAMPLE_APPROACH_MAX_ATTEMPTS 4
+#define SAMPLE_APPROACH_MAX_ATTEMPTS 6
 #define SAMPLE_APPROACH_READINGS 3
 #define SAMPLE_APPROACH_BACKGROUND_MARGIN_MM 50
+
+/* Push detection inside the closed-loop approach: a forward correction of at
+ * least MIN_FORWARD must shrink the measured distance by at least half the
+ * distance driven, otherwise the object is sliding along in front of the
+ * robot (e.g. a cardboard hill being shoved).  Consecutive strikes abort the
+ * approach before the object is pushed further. */
+#define APPROACH_PUSH_MIN_FORWARD_CM 2.0f
+#define APPROACH_PUSH_MAX_STRIKES 2
+
+/* Same-scan hill re-sighting filter: after a hill is classified during a 360
+ * sweep, a later close-object ray within the yaw window only counts as a new
+ * object when it reads at least the minimum drop closer than the recorded
+ * hill sighting.  The same hill seen a few steps later reads a similar
+ * distance; a genuinely new sample in front of it reads clearly closer. */
+#define HILL_RESIGHT_YAW_WINDOW_DEG 60.0f
+#define HILL_RESIGHT_MIN_DISTANCE_DROP_MM 75
 
 #define POST_MOVE_SCAN_TOTAL_DEG 60.0f
 #define POST_MOVE_SCAN_STEP_DEG 10.0f

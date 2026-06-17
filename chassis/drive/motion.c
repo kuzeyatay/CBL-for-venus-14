@@ -2,8 +2,10 @@
 #include <stepper.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
 
 #include "config.h"
 #include "gyro_sensor.h"
@@ -13,6 +15,7 @@
 static float normalizeTurnCommand(float angle_deg);
 static int turnStepsForAngle(float angle_deg);
 static bool waitForStepperSteps(bool update_gyro);
+static void settleWithGyroTracking(int duration_ms, bool track_yaw);
 static void runStraightMove(float distance_cm, float speed_cm_s);
 static void turnOpenLoop(float angle_deg, float speed_cm_s);
 static void turnWithGyroFeedback(float angle_deg, float speed_cm_s);
@@ -84,11 +87,17 @@ static bool waitForStepperSteps(bool update_gyro)
     bool gyro_ok = true;
 
     while (!stepper_steps_done()) {
-        if (update_gyro && !updateMPU6886Yaw()) {
-            gyro_ok = false;
+        if (update_gyro) {
+            /* No sleep while tracking yaw: each update is a multi-ms I2C
+             * burst that paces the loop by itself, and sampling as fast as
+             * possible minimizes the integration loss that the yaw scale
+             * constant otherwise has to paper over. */
+            if (!updateMPU6886Yaw()) {
+                gyro_ok = false;
+            }
+        } else {
+            sleep_msec(GYRO_TURN_UPDATE_INTERVAL_MS);
         }
-
-        sleep_msec(GYRO_TURN_UPDATE_INTERVAL_MS);
     }
 
     if (update_gyro && !updateMPU6886Yaw()) {
@@ -96,6 +105,37 @@ static bool waitForStepperSteps(bool update_gyro)
     }
 
     return gyro_ok;
+}
+
+static uint64_t motionNowUs(void)
+{
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+
+    return ((uint64_t)tv.tv_sec * 1000000ULL) + (uint64_t)tv.tv_usec;
+}
+
+/*
+ * Settle wait that keeps integrating the gyro.  A plain sleep followed by a
+ * single update hands the integrator one long gap bridging "spinning" and
+ * "stopped"; averaging the rates at the gap's ends then credits half the
+ * final rotation rate across the whole gap — about +7 phantom degrees per
+ * 15-degree turn at scan speed.  Polling continuously keeps every
+ * integration step short, so the deceleration is tracked as it happens.
+ */
+static void settleWithGyroTracking(int duration_ms, bool track_yaw)
+{
+    if (!track_yaw) {
+        sleep_msec(duration_ms);
+        return;
+    }
+
+    uint64_t end_us = motionNowUs() + (uint64_t)duration_ms * 1000ULL;
+
+    while (motionNowUs() < end_us) {
+        (void)updateMPU6886Yaw();  /* the I2C transaction paces the loop */
+    }
 }
 
 /*
@@ -137,10 +177,9 @@ static void runStraightMove(float distance_cm, float speed_cm_s)
         printf("MOVE gyro read failure mid-move; drift estimate may be partial\n");
     }
 
-    sleep_msec(500);
+    settleWithGyroTracking(500, track_yaw);
 
     if (track_yaw) {
-        (void)updateMPU6886Yaw();
         yaw_change_deg = getMPU6886YawDeg();
 
         if (fabsf(yaw_change_deg) > GYRO_TURN_TOLERANCE_DEG) {
@@ -301,8 +340,7 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
         iteration++;
     }
 
-    sleep_msec(GYRO_TURN_SETTLE_MS);
-    (void)updateMPU6886Yaw();
+    settleWithGyroTracking(GYRO_TURN_SETTLE_MS, true);
 
     measured_abs_deg = fabsf(getMPU6886YawDeg());
 
@@ -313,6 +351,121 @@ static void turnWithGyroFeedback(float angle_deg, float speed_cm_s)
            iteration);
 
     updatePoseAfterTurn((float)direction * measured_abs_deg);
+}
+
+/*
+ * Interactive gyro yaw-scale calibration.  Call from main() instead of the
+ * mission run, with the robot on the floor and room to spin in place.
+ * Console prompts only — the base station is not involved.
+ *
+ * Procedure:
+ *   1. Keep the robot still while the gyro bias is calibrated.
+ *   2. Mark the robot's heading (tape on the floor along the chassis edge),
+ *      press Enter, and let it spin full_rotations turns counterclockwise.
+ *   3. Read the leftover angle between mark and chassis: positive when the
+ *      robot rotated PAST the mark in the spin direction, negative when it
+ *      stopped short.  Type it in when prompted.
+ *   4. Copy the printed GYRO_Z_SCALE_CORRECTION into constants/config.h.
+ *
+ * Run it with the mission's dominant step size (SCAN_360_STEP_DEG) and
+ * DEFAULT_SPEED so the calibration sees the same turn dynamics.  A fixed
+ * gyro mounting tilt scales every reading by the same cos(tilt) factor, so
+ * it is absorbed into this constant too.  The spin leaves the odometry pose
+ * rotated — restart the program before running a mission.
+ */
+void runGyroScaleCalibration(int full_rotations, float step_deg, float speed_cm_s)
+{
+    char line[64];
+    float commanded_total_deg = 0.0f;
+    float commanded_so_far_deg = 0.0f;
+    float measured_total_deg = 0.0f;
+    float offset_deg = 0.0f;
+    float physical_total_deg = 0.0f;
+    float current_scale = getMPU6886GyroZScaleCorrection();
+    float new_scale = 0.0f;
+
+    if (!isMPU6886Initialized()) {
+        printf("GYRO CAL: gyro not initialized — aborting.\n");
+        return;
+    }
+
+    if (full_rotations < 1) {
+        full_rotations = 1;
+    }
+
+    if (full_rotations > 10) {
+        full_rotations = 10;
+    }
+
+    if (step_deg < 5.0f) {
+        step_deg = 5.0f;
+    }
+
+    if (step_deg > 90.0f) {
+        step_deg = 90.0f;
+    }
+
+    commanded_total_deg = (float)full_rotations * 360.0f;
+
+    printf("GYRO CAL: %d rotation(s), %.1f deg steps, %.1f cm/s, current scale %.4f\n",
+           full_rotations, step_deg, speed_cm_s, current_scale);
+    printf("GYRO CAL: keep the robot still — calibrating bias...\n");
+    updateMPU6886GyroBias(GYRO_CALIBRATION_SAMPLES);
+    printf("GYRO CAL: mark the robot's heading with tape, then press Enter to spin.\n");
+    (void)fgets(line, sizeof(line), stdin);
+
+    while (commanded_so_far_deg < commanded_total_deg - 0.01f) {
+        float chunk_deg = commanded_total_deg - commanded_so_far_deg;
+
+        if (chunk_deg > step_deg) {
+            chunk_deg = step_deg;
+        }
+
+        turn(chunk_deg, speed_cm_s);
+
+        /* turn() resets the yaw integrator on entry and leaves the measured
+         * (scale-corrected) turn angle in it. */
+        measured_total_deg += getMPU6886YawDeg();
+        commanded_so_far_deg += chunk_deg;
+    }
+
+    printf("GYRO CAL: spin done. commanded=%.1f deg, gyro measured=%.2f deg\n",
+           commanded_total_deg, measured_total_deg);
+    printf("GYRO CAL: read the angle between the tape mark and the chassis heading.\n");
+    printf("GYRO CAL: positive = rotated past the mark, negative = stopped short.\n");
+    printf("GYRO CAL: enter offset in degrees (e.g. 12 or -8.5): ");
+    fflush(stdout);
+
+    if (fgets(line, sizeof(line), stdin) == NULL ||
+        sscanf(line, "%f", &offset_deg) != 1) {
+        printf("GYRO CAL: no valid offset entered — aborting without a result.\n");
+        return;
+    }
+
+    if (fabsf(measured_total_deg) < 90.0f) {
+        printf("GYRO CAL: measured total %.2f deg is implausible — aborting.\n",
+               measured_total_deg);
+        return;
+    }
+
+    if (measured_total_deg < 0.0f) {
+        printf("GYRO CAL: measured total is negative — the gyro Z axis is inverted\n");
+        printf("GYRO CAL: (flipped mount).  The scale below carries that sign; copy it\n");
+        printf("GYRO CAL: with the minus sign, it also fixes straight-move drift signs.\n");
+    }
+
+    /* The gyro accounted measured_total_deg (signed) for a physical rotation
+     * of commanded_total_deg + offset.  The corrected scale is the current
+     * scale stretched by physical / measured; dividing by a negative
+     * measured total flips the sign for an inverted axis automatically. */
+    physical_total_deg = commanded_total_deg + offset_deg;
+    new_scale = current_scale * physical_total_deg / measured_total_deg;
+
+    printf("GYRO CAL: physical=%.1f deg, measured=%.2f deg\n",
+           physical_total_deg, measured_total_deg);
+    printf("GYRO CAL: set GYRO_Z_SCALE_CORRECTION to %.4f  (currently %.4f)\n",
+           new_scale, current_scale);
+    printf("GYRO CAL: copy it into constants/config.h and rebuild.\n");
 }
 
 void moveTo(float target_x_cm, float target_y_cm, float speed_cm_s)

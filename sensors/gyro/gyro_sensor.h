@@ -111,10 +111,16 @@ float getMPU6886GyroZBiasDps(void);
  *     actual turn = 360 deg
  *     measured turn = 350 deg
  *     scale correction = 360.0 / 350.0 = 1.02857
+ *   A NEGATIVE value is valid and means the gyro Z axis is inverted
+ *   (flipped mount): the sign makes positive yaw counterclockwise in the
+ *   robot frame.  runGyroScaleCalibration() in motion.c measures both the
+ *   magnitude and the sign.
  */
 void setMPU6886GyroDeadbandDps(float deadband_dps);
 
 void setMPU6886GyroZScaleCorrection(float scale_correction);
+
+float getMPU6886GyroZScaleCorrection(void);
 
 /* ---------------- Tilt helpers ---------------- */
 

@@ -91,6 +91,7 @@ static float gyro_z_bias_dps = 0.0f;
 
 static float yaw_deg = 0.0f;
 static uint64_t last_yaw_update_us = 0;
+static float last_gz_dps = 0.0f;
 
 static float gyro_deadband_dps = MPU6886_DEFAULT_GYRO_DEADBAND_DPS;
 static float gyro_z_scale_correction = 1.0f;
@@ -550,6 +551,7 @@ bool calibrateMPU6886Gyro(int sample_count) {
 void resetMPU6886Yaw(void) {
     yaw_deg = 0.0f;
     last_yaw_update_us = 0;
+    last_gz_dps = 0.0f;
 }
 
 bool updateMPU6886Yaw(void) {
@@ -565,8 +567,16 @@ bool updateMPU6886Yaw(void) {
 bool updateMPU6886YawFromGyroZ(float gz_dps) {
     uint64_t now = now_us();
 
+    /*
+     * Ignore tiny stationary gyro noise.
+     */
+    if (fabsf(gz_dps) < gyro_deadband_dps) {
+        gz_dps = 0.0f;
+    }
+
     if (last_yaw_update_us == 0) {
         last_yaw_update_us = now;
+        last_gz_dps = gz_dps;
         return true;
     }
 
@@ -577,17 +587,30 @@ bool updateMPU6886YawFromGyroZ(float gz_dps) {
      * Avoid large jumps after pauses/debugging.
      */
     if (dt_s <= 0.0f || dt_s > 1.0f) {
+        last_gz_dps = gz_dps;
         return true;
     }
 
     /*
-     * Ignore tiny stationary gyro noise.
+     * Trapezoidal integration: the rate over the polling gap is approximated
+     * by the average of the samples at both ends, not just the newest one.
+     * With sparse polling (each sample costs a multi-ms I2C burst) and the
+     * spiky rate profile of chunked turns, the one-sample rectangle rule
+     * systematically miscounts by an amount that varies with turn speed —
+     * which is why no single scale constant could fix all turns.
+     *
+     * Over a long gap the linear-rate assumption is not credible (the robot
+     * may have stopped right after the previous sample, and averaging would
+     * credit half the old rate across the whole gap as phantom rotation),
+     * so fall back to the newest sample alone there.
      */
-    if (fabsf(gz_dps) < gyro_deadband_dps) {
-        gz_dps = 0.0f;
+    if (dt_s > 0.05f) {
+        yaw_deg += gz_dps * gyro_z_scale_correction * dt_s;
+    } else {
+        yaw_deg += 0.5f * (last_gz_dps + gz_dps) * gyro_z_scale_correction * dt_s;
     }
 
-    yaw_deg += (gz_dps * gyro_z_scale_correction) * dt_s;
+    last_gz_dps = gz_dps;
     normalize_yaw_deg();
 
     return true;
@@ -610,11 +633,18 @@ void setMPU6886GyroDeadbandDps(float deadband_dps) {
 }
 
 void setMPU6886GyroZScaleCorrection(float scale_correction) {
-    if (scale_correction <= 0.0f) {
+    /* Negative is legitimate: a flipped gyro mount inverts the Z axis, and
+     * the correction carries that sign so positive yaw is counterclockwise
+     * in the robot frame.  Only a near-zero value is replaced. */
+    if (fabsf(scale_correction) < 0.01f) {
         scale_correction = 1.0f;
     }
 
     gyro_z_scale_correction = scale_correction;
+}
+
+float getMPU6886GyroZScaleCorrection(void) {
+    return gyro_z_scale_correction;
 }
 
 /* ---------------- Tilt helpers ---------------- */

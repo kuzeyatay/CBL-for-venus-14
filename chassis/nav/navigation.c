@@ -86,6 +86,13 @@ typedef struct {
     int invalid_reading_count;
 } distance_window_t;
 
+typedef enum {
+    APPROACH_OK,            /* verified at target distance within tolerance */
+    APPROACH_NOT_CONVERGED, /* ran out of attempts, no push detected */
+    APPROACH_PUSHING        /* forward motion stopped shrinking the distance:
+                               the object is sliding in front of the robot */
+} approach_result_t;
+
 static const char *cellStatusToString(cell_status_t status);
 static const char *colorToString(sample_color_t color);
 static const char *directionName(nav_direction_t direction);
@@ -106,6 +113,7 @@ static bool poseToGridCell(float x_cm, float y_cm, int *grid_x, int *grid_y);
 static bool poseToCurrentGridCell(grid_cell_t *cell);
 static grid_cell_t projectMeasuredObjectCell(int distance_mm,
                                              grid_cell_t fallback_cell);
+static bool isKnownObjectCell(grid_cell_t cell);
 static bool shouldTreatBlackReadingAsTape(bool black_detected,
                                           bool close_front_object_detected);
 static bool estimateSampleSize(float width_cm, int *sample_size_cm);
@@ -134,7 +142,7 @@ static void turnToYaw(float target_yaw_deg, float speed_cm_s);
 static void turnTowardPoint(float target_x_cm, float target_y_cm, float speed_cm_s);
 static void returnToPoseApprox(pose_t saved_pose);
 static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg);
-static bool moveToDistanceFromObject(int target_distance_mm);
+static approach_result_t moveToDistanceFromObject(int target_distance_mm);
 static void finalizeRockSampleAtCloseRange(field_event_t *event);
 static void reportFieldEvent(field_event_t event);
 static void markHillBlockAroundCell(grid_cell_t center_cell);
@@ -144,9 +152,9 @@ static void markCurrentCellState(void);
 static void runScan360(void);
 static void updateMapFromScan(void);
 static void chooseNextTarget(void);
-static void investigateObjectAt(grid_cell_t candidate_cell,
-                                nav_direction_t direction,
-                                float candidate_yaw);
+static field_event_type_t investigateObjectAt(grid_cell_t candidate_cell,
+                                              nav_direction_t direction,
+                                              float candidate_yaw);
 static void investigateObjectCandidate(void);
 static void handleMovementObject(grid_cell_t affected_cell,
                                  grid_cell_t return_cell,
@@ -429,6 +437,38 @@ static grid_cell_t projectMeasuredObjectCell(int distance_mm,
     }
 
     return cell;
+}
+
+/*
+ * True when the cell the distance beam lands on already belongs to a
+ * classified object.  Hills get one cell of slack in every direction: the
+ * 2x2 hill footprint is anchored from a noisy distance projection, so a
+ * repeat sighting of the same hill routinely lands one cell off the marked
+ * block — which is exactly how a clipped hill edge gets re-measured with a
+ * tiny width and re-reported as a brand-new rock sample.
+ */
+static bool isKnownObjectCell(grid_cell_t cell)
+{
+    if (!isInsideMap(cell.x, cell.y)) {
+        return false;
+    }
+
+    if (isTerminalCellStatus(map_grid[cell.x][cell.y])) {
+        return true;
+    }
+
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            int x = cell.x + dx;
+            int y = cell.y + dy;
+
+            if (isInsideMap(x, y) && map_grid[x][y] == CELL_HILL) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 static bool shouldTreatBlackReadingAsTape(bool black_detected,
@@ -801,8 +841,14 @@ static void setMapCellStatus(int x, int y, cell_status_t status)
         return;
     }
 
-    if (status == CELL_SCANNED_CLEAR && previous == CELL_EXPLORED) {
-        printf("MAP CELL weak clear ignored: (%d,%d) stays %s\n",
+    /* EXPLORED means the robot physically stood on the cell — strictly more
+     * information than a scan result.  Downgrading it (e.g. an investigation
+     * resetting a backtrack target to unknown) would also break backtracking,
+     * which only travels through explored cells. */
+    if (previous == CELL_EXPLORED &&
+        (status == CELL_SCANNED_CLEAR || status == CELL_UNKNOWN)) {
+        printf("MAP CELL weak %s ignored: (%d,%d) stays %s\n",
+               cellStatusToString(status),
                x,
                y,
                cellStatusToString(previous));
@@ -944,11 +990,17 @@ static void reverseToCellCenter(grid_cell_t cell, float final_yaw_deg)
  * the color read at SAMPLE_COLOR_DISTANCE_MM, so the robot must actually
  * reach the requested distance: read, correct, re-read until within
  * tolerance instead of trusting one reading and one open-loop move.
- * Returns true when the final verified distance is within tolerance.
+ * Returns APPROACH_OK when the final verified distance is within tolerance,
+ * APPROACH_PUSHING when forward motion stops shrinking the measured distance
+ * (the object is sliding along in front of the robot — stop before shoving
+ * it further), and APPROACH_NOT_CONVERGED otherwise.
  */
-static bool moveToDistanceFromObject(int target_distance_mm)
+static approach_result_t moveToDistanceFromObject(int target_distance_mm)
 {
     int last_distance_mm = VL53L0X_INVALID_DISTANCE_MM;
+    int previous_reading_mm = VL53L0X_INVALID_DISTANCE_MM;
+    float net_forward_since_reading_cm = 0.0f;
+    int push_strike_count = 0;
 
     for (int attempt = 1; attempt <= SAMPLE_APPROACH_MAX_ATTEMPTS; attempt++) {
         int distance_mm = readMedianUsableDistanceMm(SAMPLE_APPROACH_READINGS);
@@ -969,6 +1021,35 @@ static bool moveToDistanceFromObject(int target_distance_mm)
             continue;
         }
 
+        /* Push detection: driving forward must shrink the reading by roughly
+         * the distance driven.  An object sliding in front of the robot keeps
+         * the reading nearly constant while the robot advances. */
+        if (previous_reading_mm != VL53L0X_INVALID_DISTANCE_MM &&
+            net_forward_since_reading_cm >= APPROACH_PUSH_MIN_FORWARD_CM) {
+            int expected_drop_mm = (int)(net_forward_since_reading_cm * 10.0f);
+            int actual_drop_mm = previous_reading_mm - distance_mm;
+
+            if (actual_drop_mm * 2 < expected_drop_mm) {
+                push_strike_count++;
+                printf("Sample approach push strike %d/%d: moved %.1f cm, distance %d -> %d mm\n",
+                       push_strike_count,
+                       APPROACH_PUSH_MAX_STRIKES,
+                       net_forward_since_reading_cm,
+                       previous_reading_mm,
+                       distance_mm);
+
+                if (push_strike_count >= APPROACH_PUSH_MAX_STRIKES) {
+                    sendNavLog("WARN", "Approach aborted at %dmm — object sliding (pushed)",
+                               distance_mm);
+                    return APPROACH_PUSHING;
+                }
+            } else {
+                push_strike_count = 0;
+            }
+        }
+
+        previous_reading_mm = distance_mm;
+        net_forward_since_reading_cm = 0.0f;
         last_distance_mm = distance_mm;
 
         int error_mm = distance_mm - target_distance_mm;
@@ -977,7 +1058,7 @@ static bool moveToDistanceFromObject(int target_distance_mm)
         if (abs_error_mm <= SAMPLE_APPROACH_TOLERANCE_MM) {
             printf("Sample approach done: %d mm (target %d mm)\n",
                    distance_mm, target_distance_mm);
-            return true;
+            return APPROACH_OK;
         }
 
         if (attempt == SAMPLE_APPROACH_MAX_ATTEMPTS) {
@@ -1002,17 +1083,19 @@ static bool moveToDistanceFromObject(int target_distance_mm)
                distance_mm);
 
         moveWithRamp(move_cm, SAMPLE_APPROACH_SPEED_CM_S);
+        net_forward_since_reading_cm += move_cm;
         sendPoseUpdate();
     }
 
     sendNavLog("WARN", "Approach to %dmm did not converge (last reading %dmm)",
                target_distance_mm, last_distance_mm);
-    return false;
+    return APPROACH_NOT_CONVERGED;
 }
 
 static void finalizeRockSampleAtCloseRange(field_event_t *event)
 {
-    bool at_color_distance = moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM);
+    bool at_color_distance =
+        moveToDistanceFromObject(SAMPLE_COLOR_DISTANCE_MM) == APPROACH_OK;
 
     event->distance_mm = readVL53L0XDistance();
 
@@ -1057,33 +1140,39 @@ static void markHillBlockAroundCell(grid_cell_t center_cell)
      * A ~30 cm hill spans roughly a 2x2 block of 15 cm cells.  A 2x2 has no
      * center cell, so anchor it on the detected cell and extend it away from
      * the robot (the hill lies beyond the detection point) plus one cell to
-     * one lateral side.  The forward direction comes from robot -> hill.
+     * one lateral side.
+     *
+     * Forward must be a single cardinal axis, taken from the robot's yaw
+     * (the robot faces the hill when this runs).  Deriving it from the
+     * robot->hill cell difference breaks on diagonals: both components step
+     * at once and the four cells land in a diamond with a hole in the middle
+     * instead of a solid 2x2 square.
      */
-    int fwd_x = center_cell.x - current_cell.x;
-    int fwd_y = center_cell.y - current_cell.y;
+    static const float cardinal_yaw_deg[NAV_DIR_COUNT] =
+        {0.0f, 90.0f, 180.0f, 270.0f};
 
-    if (fwd_x == 0 && fwd_y == 0) {
-        fwd_x = 1;  /* fallback if the hill was detected on the current cell */
+    pose_t pose = getPose();
+    nav_direction_t facing = directionFromYaw(pose.yaw);
+    float off_axis_deg = shortestAngleDelta(pose.yaw, cardinal_yaw_deg[facing]);
+    int fwd_x = 0;
+    int fwd_y = 0;
+
+    switch (facing) {
+        case NAV_DIR_POS_X: fwd_x = 1;  break;
+        case NAV_DIR_POS_Y: fwd_y = 1;  break;
+        case NAV_DIR_NEG_X: fwd_x = -1; break;
+        case NAV_DIR_NEG_Y: fwd_y = -1; break;
+        default:            fwd_x = 1;  break;
     }
 
-    if (fwd_x > 0) {
-        fwd_x = 1;
-    } else if (fwd_x < 0) {
-        fwd_x = -1;
-    }
+    /* Lateral cell on the side of the cardinal axis the beam leans toward:
+     * positive off-axis means the hill extends counterclockwise of forward
+     * (forward rotated +90 degrees), negative means clockwise. */
+    int perp_x = off_axis_deg >= 0.0f ? -fwd_y : fwd_y;
+    int perp_y = off_axis_deg >= 0.0f ? fwd_x : -fwd_x;
 
-    if (fwd_y > 0) {
-        fwd_y = 1;
-    } else if (fwd_y < 0) {
-        fwd_y = -1;
-    }
-
-    /* Lateral cell: perpendicular to forward (forward rotated +90 degrees). */
-    int perp_x = -fwd_y;
-    int perp_y = fwd_x;
-
-    printf("MARK HILL 2x2 center=(%d,%d), fwd=(%d,%d), perp=(%d,%d)\n",
-           center_cell.x, center_cell.y, fwd_x, fwd_y, perp_x, perp_y);
+    printf("MARK HILL 2x2 center=(%d,%d), yaw=%.2f, fwd=(%d,%d), perp=(%d,%d)\n",
+           center_cell.x, center_cell.y, pose.yaw, fwd_x, fwd_y, perp_x, perp_y);
 
     for (int f = 0; f <= 1; f++) {
         for (int p = 0; p <= 1; p++) {
@@ -1185,6 +1274,12 @@ static void runScan360(void)
     float sweep_start_yaw = original_yaw;
     bool tape_scan_enabled = isTCS3200Calibrated();
 
+    /* Last hill classified during this sweep: later close-object rays near
+     * that heading must read clearly closer to count as a new object. */
+    bool hill_sighted = false;
+    float hill_sighted_yaw = 0.0f;
+    int hill_sighted_distance_mm = 0;
+
     /* Determine which direction arcs actually need scanning.
      * EXPLORED and terminal cells are definitively known — skip their arcs.
      * SCANNED_CLEAR is kept active because edge objects near its boundary
@@ -1274,20 +1369,59 @@ static void runScan360(void)
 
             if (close_object) {
                 grid_cell_t obj_cell = adjacentCell(current_cell, direction);
+                grid_cell_t hit_cell =
+                    projectMeasuredObjectCell(window.best_close_distance_mm,
+                                              obj_cell);
+                /* A hill classified earlier in this sweep is re-seen at a
+                 * similar distance for many steps; a genuinely new object in
+                 * front of it must read clearly closer than the hill did. */
+                bool same_hill_by_distance =
+                    hill_sighted &&
+                    fabsf(shortestAngleDelta(pose.yaw, hill_sighted_yaw)) <=
+                        HILL_RESIGHT_YAW_WINDOW_DEG &&
+                    window.best_close_distance_mm >
+                        hill_sighted_distance_mm - HILL_RESIGHT_MIN_DISTANCE_DROP_MM;
 
-                if (isInsideMap(obj_cell.x, obj_cell.y) &&
-                    missionFrameLocalGridIndexIsInAssignedHalf(obj_cell.x, obj_cell.y) &&
-                    map_grid[obj_cell.x][obj_cell.y] != CELL_EXPLORED &&
-                    !isTerminalCellStatus(map_grid[obj_cell.x][obj_cell.y])) {
-                    printf("SCAN360 object seen dir=%s cell=(%d,%d) yaw=%.2f — investigating now\n",
-                           directionName(direction), obj_cell.x, obj_cell.y, pose.yaw);
-                    investigateObjectAt(obj_cell, direction, pose.yaw);
+                if (isKnownObjectCell(hit_cell)) {
+                    /* The beam landed on an already-classified object — a
+                     * repeat sighting, not a new candidate.  Keep the arc
+                     * active and take the normal step so a different object
+                     * later in this arc (e.g. a sample one step past a hill)
+                     * is still found. */
+                    printf("SCAN360 known object re-sighted dir=%s hit=(%d,%d) yaw=%.2f — sweep continues\n",
+                           directionName(direction), hit_cell.x, hit_cell.y, pose.yaw);
+                    sendNavLog("INFO", "Known object re-sighted at yaw %.0f — skipped",
+                               pose.yaw);
+                } else if (same_hill_by_distance) {
+                    printf("SCAN360 hill re-sighted by distance dir=%s yaw=%.2f dist=%d (hill %d mm @ yaw %.2f) — sweep continues\n",
+                           directionName(direction), pose.yaw,
+                           window.best_close_distance_mm,
+                           hill_sighted_distance_mm, hill_sighted_yaw);
+                    sendNavLog("INFO", "Hill re-sighted at yaw %.0f (%dmm vs %dmm) — skipped",
+                               pose.yaw, window.best_close_distance_mm,
+                               hill_sighted_distance_mm);
+                } else {
+                    if (isInsideMap(obj_cell.x, obj_cell.y) &&
+                        missionFrameLocalGridIndexIsInAssignedHalf(obj_cell.x, obj_cell.y) &&
+                        map_grid[obj_cell.x][obj_cell.y] != CELL_EXPLORED &&
+                        !isTerminalCellStatus(map_grid[obj_cell.x][obj_cell.y])) {
+                        printf("SCAN360 object seen dir=%s cell=(%d,%d) yaw=%.2f — investigating now\n",
+                               directionName(direction), obj_cell.x, obj_cell.y, pose.yaw);
+
+                        if (investigateObjectAt(obj_cell, direction, pose.yaw) ==
+                                FIELD_HILL) {
+                            hill_sighted = true;
+                            hill_sighted_yaw = pose.yaw;
+                            hill_sighted_distance_mm =
+                                window.best_close_distance_mm;
+                        }
+                    }
+
+                    /* This direction is classified — skip the rest of its arc and
+                     * resume the sweep from where we left off. */
+                    dir_active[direction] = false;
+                    continue;
                 }
-
-                /* This direction is classified — skip the rest of its arc and
-                 * resume the sweep from where we left off. */
-                dir_active[direction] = false;
-                continue;
             } else if (black_tape) {
                 scan_evidence[direction].tape_count++;
             } else if (clear) {
@@ -1471,11 +1605,14 @@ static void chooseNextTarget(void)
  * it is really there, approach to classification distance, classify it, mark
  * the cell, and return to the pose we started from.  Called inline during the
  * 360 scan (the moment an object is seen) and from the post-scan candidate
- * queue.  Always leaves the robot back at its starting pose.
+ * queue.  Always leaves the robot back at its starting pose.  Returns the
+ * event type acted on (FIELD_CLEAR when nothing was confirmed, FIELD_HILL
+ * also when a duplicate hill sighting was suppressed) so the scan sweep can
+ * track what it just saw.
  */
-static void investigateObjectAt(grid_cell_t candidate_cell,
-                                nav_direction_t direction,
-                                float candidate_yaw)
+static field_event_type_t investigateObjectAt(grid_cell_t candidate_cell,
+                                              nav_direction_t direction,
+                                              float candidate_yaw)
 {
     pose_t saved_pose = getPose();
 
@@ -1500,10 +1637,22 @@ static void investigateObjectAt(grid_cell_t candidate_cell,
                    confirm_window.display_distance_mm);
         setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
         returnToPoseApprox(saved_pose);
-        return;
+        return FIELD_CLEAR;
     }
 
-    moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+    if (moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM) ==
+            APPROACH_PUSHING) {
+        /* The object slid along in front of the robot during the approach.
+         * A width measured while pressed against it is garbage — a shoved
+         * hill face reads a few cm wide and turns into a phantom rock
+         * sample — so do not classify.  UNKNOWN keeps the cell off-limits
+         * as a drive target but rescannable from another vantage. */
+        sendNavLog("WARN", "Object at %s pushed during approach — not classified",
+                   directionName(direction));
+        setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_UNKNOWN);
+        returnToPoseApprox(saved_pose);
+        return FIELD_SENSOR_FAULT;
+    }
 
     sensor_data_t sensor_data = readReliableSensorData();
     field_event_t event = interpretSensorData(sensor_data);
@@ -1521,18 +1670,42 @@ static void investigateObjectAt(grid_cell_t candidate_cell,
                event.width_cm,
                event.distance_mm);
 
+    /* Cell the beam actually hit at classification distance.  The object is
+     * marked there, not at the scan candidate cell: an object seen through
+     * an adjacent cell sits further away, and marking the candidate puts the
+     * map entry (and later dedup matching) one or two cells off the object. */
+    grid_cell_t hit_cell = candidate_cell;
+
+    if (event.type == FIELD_ROCK_SAMPLE || event.type == FIELD_HILL) {
+        hit_cell = projectMeasuredObjectCell(event.distance_mm, candidate_cell);
+
+        /* A sighting that lands on (or one cell off) an already-marked
+         * object is a repeat of something already classified and reported;
+         * re-reporting it would double-count it — and a clipped hill edge
+         * measures a small width, so the repeat typically arrives disguised
+         * as a new rock sample. */
+        if (isKnownObjectCell(hit_cell)) {
+            printf("Duplicate sighting suppressed: %s hit=(%d,%d) overlaps classified object\n",
+                   eventToString(event.type), hit_cell.x, hit_cell.y);
+            sendNavLog("INFO", "Duplicate %s sighting at (%d,%d) suppressed",
+                       eventToString(event.type), hit_cell.x, hit_cell.y);
+            returnToPoseApprox(saved_pose);
+            return event.type;
+        }
+    }
+
     switch (event.type) {
         case FIELD_ROCK_SAMPLE: {
             finalizeRockSampleAtCloseRange(&event);
-            /* Override distance with the geometric distance to the candidate
-             * cell center so sendFieldEventUpdate projects the EVENT to the
-             * same cell that markSampleAtCell marks (fixes icon/cell mismatch). */
+            /* Override distance with the geometric distance to the hit cell
+             * center so sendFieldEventUpdate projects the EVENT to the same
+             * cell that markSampleAtCell marks (fixes icon/cell mismatch). */
             pose_t post_approach = getPose();
-            float dx = cellCenterXCm(candidate_cell) - post_approach.x;
-            float dy = cellCenterYCm(candidate_cell) - post_approach.y;
+            float dx = cellCenterXCm(hit_cell) - post_approach.x;
+            float dy = cellCenterYCm(hit_cell) - post_approach.y;
             event.distance_mm = (int)(sqrtf(dx * dx + dy * dy) * 10.0f);
             reportFieldEvent(event);
-            markSampleAtCell(candidate_cell);
+            markSampleAtCell(hit_cell);
             break;
         }
 
@@ -1540,14 +1713,9 @@ static void investigateObjectAt(grid_cell_t candidate_cell,
             if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
                 event.width_cm = HILL_PHYSICAL_SIZE_CM;
             }
-            /* Anchor the footprint on the cell the measured distance points
-             * at, not the scan candidate cell: a hill seen through an
-             * adjacent cell sits further away, and anchoring on the candidate
-             * drags the 2x2 block toward the robot, off the real hill. */
-            grid_cell_t hill_cell =
-                projectMeasuredObjectCell(event.distance_mm, candidate_cell);
+
             reportFieldEvent(event);
-            markHillBlockAroundCell(hill_cell);
+            markHillBlockAroundCell(hit_cell);
             break;
         }
 
@@ -1559,17 +1727,22 @@ static void investigateObjectAt(grid_cell_t candidate_cell,
         case FIELD_SENSOR_FAULT:
             printf("Object confirmation failed: sensor fault\n");
             reportFieldEvent(event);
-            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+            /* A close object was confirmed right before the approach, so the
+             * cell is not clear — it holds something that failed to classify.
+             * SCANNED_CLEAR would make it a drive target and send the robot
+             * into the object; UNKNOWN keeps it off-limits but rescannable. */
+            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_UNKNOWN);
             break;
 
         case FIELD_CLEAR:
         default:
             printf("Object confirmation failed: event=%s\n", eventToString(event.type));
-            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_SCANNED_CLEAR);
+            setMapCellStatus(candidate_cell.x, candidate_cell.y, CELL_UNKNOWN);
             break;
     }
 
     returnToPoseApprox(saved_pose);
+    return event.type;
 }
 
 static void investigateObjectCandidate(void)
@@ -1618,7 +1791,14 @@ static void handleMovementObject(grid_cell_t affected_cell,
      * window, which is usually closer than the width-classification
      * distance. Back up to it first, like the scan-360 investigation path,
      * so the width scan geometry matches the tuned thresholds. */
-    moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM);
+    if (moveToDistanceFromObject(INVESTIGATE_APPROACH_DISTANCE_MM) ==
+            APPROACH_PUSHING) {
+        sendNavLog("WARN", "Object at (%d,%d) pushed during approach — not classified",
+                   affected_cell.x, affected_cell.y);
+        setMapCellStatus(affected_cell.x, affected_cell.y, CELL_UNKNOWN);
+        reverseToCellCenter(return_cell, return_yaw_deg);
+        return;
+    }
 
     sensor_data_t sensor_data = readReliableSensorData();
     field_event_t event = interpretSensorData(sensor_data);
@@ -1628,22 +1808,49 @@ static void handleMovementObject(grid_cell_t affected_cell,
            affected_cell.x,
            affected_cell.y);
 
+    /* Cell the beam actually hit at classification distance — objects are
+     * marked there, not at the move target cell (the object that stopped the
+     * move can sit one or two cells beyond the target). */
+    grid_cell_t hit_cell = affected_cell;
+
+    if (event.type == FIELD_ROCK_SAMPLE || event.type == FIELD_HILL) {
+        hit_cell = projectMeasuredObjectCell(event.distance_mm, affected_cell);
+
+        /* Same duplicate guard as the scan investigation: if the beam landed
+         * on (or one cell off) an already-marked object, do not re-report it.
+         * The cell goes back to unknown so it is never blindly entered but
+         * stays eligible for a future rescan. */
+        if (isKnownObjectCell(hit_cell)) {
+            printf("MOVE TARGET CENTER duplicate sighting suppressed: %s hit=(%d,%d)\n",
+                   eventToString(event.type), hit_cell.x, hit_cell.y);
+            sendNavLog("INFO", "Duplicate %s sighting at (%d,%d) suppressed",
+                       eventToString(event.type), hit_cell.x, hit_cell.y);
+            setMapCellStatus(affected_cell.x, affected_cell.y, CELL_UNKNOWN);
+            reverseToCellCenter(return_cell, return_yaw_deg);
+            return;
+        }
+    }
+
     switch (event.type) {
-        case FIELD_ROCK_SAMPLE:
+        case FIELD_ROCK_SAMPLE: {
             finalizeRockSampleAtCloseRange(&event);
+            /* Project the EVENT to the marked cell, like the scan path. */
+            pose_t post_approach = getPose();
+            float dx = cellCenterXCm(hit_cell) - post_approach.x;
+            float dy = cellCenterYCm(hit_cell) - post_approach.y;
+            event.distance_mm = (int)(sqrtf(dx * dx + dy * dy) * 10.0f);
             reportFieldEvent(event);
-            markSampleAtCell(affected_cell);
+            markSampleAtCell(hit_cell);
             break;
+        }
 
         case FIELD_HILL: {
             if (event.width_cm < HILL_PHYSICAL_SIZE_CM) {
                 event.width_cm = HILL_PHYSICAL_SIZE_CM;
             }
 
-            grid_cell_t hill_cell =
-                projectMeasuredObjectCell(event.distance_mm, affected_cell);
             reportFieldEvent(event);
-            markHillBlockAroundCell(hill_cell);
+            markHillBlockAroundCell(hit_cell);
             break;
         }
 
@@ -1855,22 +2062,35 @@ static void moveToTargetCenter(void)
         }
 
         if (close_object) {
-            sendNavLog("WARN", "Object during move to (%d,%d): dist=%dmm",
-                       target_cell.x, target_cell.y,
-                       front_window.display_distance_mm);
-            printf("MOVE TARGET CENTER object safety stop target=(%d,%d), distance=%d, close_reads=%d/%d, invalid_reads=%d, raw_black=%s\n",
-                   target_cell.x,
-                   target_cell.y,
-                   front_window.display_distance_mm,
-                   front_window.close_reading_count,
-                   MOVE_DISTANCE_READINGS_PER_CHECK,
-                   front_window.invalid_reading_count,
-                   raw_black ? "yes" : "no");
-            handleMovementObject(target_cell, return_cell, start_pose.yaw);
-            current_cell = return_cell;
-            transitionTo(NAV_STATE_CHOOSE_TARGET,
-                         "returned to already-scanned cell after movement object");
-            return;
+            int remaining_mm = (int)(distance_cm * 10.0f);
+
+            /* An object further away than the end of this move (plus the
+             * nose clearance) does not block it: stopping at the target
+             * still leaves a gap.  A hill 20 cm beyond a backtrack target
+             * must not strand the robot on the wrong side of the map. */
+            if (front_window.best_close_distance_mm >
+                    remaining_mm + MOVE_OBJECT_STOP_CLEARANCE_MM) {
+                printf("MOVE TARGET CENTER object beyond target ignored: dist=%d mm, remaining=%d mm\n",
+                       front_window.best_close_distance_mm,
+                       remaining_mm);
+            } else {
+                sendNavLog("WARN", "Object during move to (%d,%d): dist=%dmm",
+                           target_cell.x, target_cell.y,
+                           front_window.display_distance_mm);
+                printf("MOVE TARGET CENTER object safety stop target=(%d,%d), distance=%d, close_reads=%d/%d, invalid_reads=%d, raw_black=%s\n",
+                       target_cell.x,
+                       target_cell.y,
+                       front_window.display_distance_mm,
+                       front_window.close_reading_count,
+                       MOVE_DISTANCE_READINGS_PER_CHECK,
+                       front_window.invalid_reading_count,
+                       raw_black ? "yes" : "no");
+                handleMovementObject(target_cell, return_cell, start_pose.yaw);
+                current_cell = return_cell;
+                transitionTo(NAV_STATE_CHOOSE_TARGET,
+                             "returned to already-scanned cell after movement object");
+                return;
+            }
         }
 
         float step_cm = distance_cm;

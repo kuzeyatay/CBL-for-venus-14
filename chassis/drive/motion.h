@@ -7,6 +7,7 @@ int speedFromCmPerSec(float cm_per_sec);
 
 void setGyroTurnFeedbackEnabled(bool enabled);
 void recalibrateGyroIfReady(void);
+void runGyroScaleCalibration(int full_rotations, float step_deg, float speed_cm_s);
 void moveWithRamp(float distance_cm, float speed_cm_s);
 void move(float distance_cm, float speed_cm_s);
 void turn(float angle_deg, float speed_cm_s);

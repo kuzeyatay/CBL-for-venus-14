@@ -13,7 +13,11 @@
       "PowerShell(New-Item -ItemType Directory -Force \"$env:TEMP\\\\pynq_stubs\" | Out-Null; Set-Content -Encoding utf8 \"$env:TEMP\\\\pynq_stubs\\\\libpynq.h\" \"#pragma once`nvoid sleep_msec\\(int ms\\);\"; Set-Content -Encoding utf8 \"$env:TEMP\\\\pynq_stubs\\\\stepper.h\" \"#pragma once`n#include <stdbool.h>`nvoid stepper_set_speed\\(unsigned int l, unsigned int r\\);`nvoid stepper_steps\\(int l, int r\\);`nbool stepper_steps_done\\(void\\);\")",
       "PowerShell(gcc -fsyntax-only -std=gnu11 -Wall -Wextra -I \"$env:TEMP\\\\pynq_stubs\" -I constants -I \"chassis\\\\drive\" -I \"chassis\\\\odom\" -I \"chassis\\\\nav\" -I \"sensors\\\\gyro\" -I . \"chassis\\\\drive\\\\motion.c\")",
       "PowerShell(gcc -fsyntax-only -std=gnu11 -Wall -Wextra -I \"$env:TEMP\\\\pynq_stubs\" -I constants -I \"chassis\\\\drive\" -I \"chassis\\\\odom\" -I \"chassis\\\\nav\" -I \"sensors\" -I \"sensors\\\\gyro\" -I \"sensors\\\\distance\" -I \"sensors\\\\color\" -I \"sensors\\\\temperature\" -I \"comms\" -I . \"chassis\\\\nav\\\\navigation.c\")",
-      "PowerShell(Remove-Item -Recurse -Force \"$env:TEMP\\\\pynq_stubs\")"
+      "PowerShell(Remove-Item -Recurse -Force \"$env:TEMP\\\\pynq_stubs\")",
+      "Bash(gcc -fsyntax-only -I. -Iconstants -Ichassis/drive -Ichassis/nav -Ichassis/odom -Icomms -Isensors -Isensors/color -Isensors/distance -Isensors/gyro -Isensors/temperature chassis/nav/navigation.c)",
+      "Bash(python3 -)",
+      "Bash(gcc -fsyntax-only -Wall -I. -Iconstants -Ichassis/drive -Ichassis/nav -Ichassis/odom -Icomms -Isensors -Isensors/color -Isensors/distance -Isensors/gyro -Isensors/temperature chassis/nav/navigation.c)",
+      "Bash(gcc -fsyntax-only -Wall -I. -Iconstants -Ichassis/drive -Ichassis/nav -Ichassis/odom -Icomms -Isensors -Isensors/color -Isensors/distance -Isensors/gyro -Isensors/temperature sensors/distance/distance_sensor.c)"
     ]
   }
 }
