@@ -243,8 +243,16 @@ void handleBaseStationMessage(const char *message)
         return;
     }
 
-    printf("Unknown base station message: %s\n", message);
-    sendErrorMessage("unknown_command");
+    /*
+     * Anything else is not a command for this robot.  On the shared ESP32/MQTT
+     * channel that usually means telemetry from the other robot, or this
+     * robot's own output echoed back (STATUS, ERROR, POSE, ...).  Replying with
+     * an ERROR here created an infinite unknown_command storm: each robot
+     * answered the other's reply forever, which also desynced the UART framing
+     * (the bytes "ERRO" get misread as a length prefix).  Unrecognized messages
+     * are therefore dropped silently — never answered.
+     */
+    printf("Ignoring non-command message: %s\n", message);
 }
 
 void sendPoseUpdate(void)
