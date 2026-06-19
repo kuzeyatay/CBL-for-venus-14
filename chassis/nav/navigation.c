@@ -1148,6 +1148,41 @@ static void markHillBlockAroundCell(grid_cell_t center_cell)
     int perp_x = off_axis_deg >= 0.0f ? -fwd_y : fwd_y;
     int perp_y = off_axis_deg >= 0.0f ? fwd_x : -fwd_x;
 
+    /* A hill must always map as a full 2x2.  The beam-lean side can point off
+     * the map or across the assigned-half divider, which would drop two cells
+     * and leave a clipped 2x1 (the reported bug).  Count how many of the four
+     * cells each lateral side keeps in bounds and in the assigned half, and
+     * flip to the opposite side when it fits more — so the block stays a solid
+     * 2x2.  The beam-lean side wins ties. */
+    {
+        int pref_fit = 0;
+        int alt_fit = 0;
+
+        for (int f = 0; f <= 1; f++) {
+            for (int p = 0; p <= 1; p++) {
+                int px = center_cell.x + f * fwd_x + p * perp_x;
+                int py = center_cell.y + f * fwd_y + p * perp_y;
+                int ax = center_cell.x + f * fwd_x - p * perp_x;
+                int ay = center_cell.y + f * fwd_y - p * perp_y;
+
+                if (isInsideMap(px, py) &&
+                    missionFrameLocalGridIndexIsInAssignedHalf(px, py)) {
+                    pref_fit++;
+                }
+
+                if (isInsideMap(ax, ay) &&
+                    missionFrameLocalGridIndexIsInAssignedHalf(ax, ay)) {
+                    alt_fit++;
+                }
+            }
+        }
+
+        if (alt_fit > pref_fit) {
+            perp_x = -perp_x;
+            perp_y = -perp_y;
+        }
+    }
+
     printf("MARK HILL 2x2 center=(%d,%d), yaw=%.2f, fwd=(%d,%d), perp=(%d,%d)\n",
            center_cell.x, center_cell.y, pose.yaw, fwd_x, fwd_y, perp_x, perp_y);
 

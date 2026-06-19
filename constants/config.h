@@ -274,7 +274,7 @@
  * triggering the bimodal split in the first place: a stationary robot reads
  * the object's distance steadily. */
 #define WIDTH_SCAN_MIN_IN_PLACE_MM 70
-#define WIDTH_SCAN_MAX_IN_PLACE_MM 250
+#define WIDTH_SCAN_MAX_IN_PLACE_MM 200
 #define SAMPLE_APPROACH_TOLERANCE_MM 5
 /* Per-attempt move cap: one overestimated VL53L0X reading (sloped/dark hill
  * face) must not be able to drive the robot into the object.  8 cm bounds the
