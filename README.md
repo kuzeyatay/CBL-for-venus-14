@@ -15,5 +15,14 @@ The goal of the system is to explore an unknown terrain using two autonomous rob
   * `color/` `distance/` `temperature/` Drivers for collecting environmental data
 ## Build and Setup
 ### Prerequisites
-### Configuration
+* PYNQ-Z2 Board
+* Compiler: `gcc`
+* `libpynq` library
 ### Compilation
+The project uses a MakeFile to handle building. To compile the code:
+1. Navigate to the project directory.
+2. Compile the code by running:
+```
+make run
+```
+_(Note: If you need to clean the build files first, use `make clean`)_
